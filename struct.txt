@@ -1,0 +1,28 @@
+Traffic-Emission-Monitor/
+├── config/
+│   ├── __init__.py
+│   └── settings.py          # [配置层] 管理标定参数、MOVES排放因子表、调试开关
+├── core/
+│   ├── __init__.py
+│   ├── geometry.py          # [核心算法] 透视变换 (ViewTransformer)
+│   ├── filters.py           # [核心算法] 卡尔曼滤波 (KalmanFilterCV)
+│   └── vehicle_registry.py  # [核心数据] 车辆注册表 (生命周期管理、历史记录、累积统计)
+├── perception/
+│   ├── __init__.py
+│   ├── kinematics.py        # [感知层] 运动学参数估算 (KinematicsEstimator)
+│   └── plate_reader.py      # [感知层] 车牌识别与映射 (LicensePlateRecognizer)
+├── analysis/
+│   ├── __init__.py
+│   └── brake_model.py       # [业务层] 刹车排放模型 (OpMode判定、排放因子查表)
+├── utils/
+│   ├── __init__.py
+│   ├── visualization.py     # [通用工具] 绘图与标注封装 (Visualizer)
+│   ├── calibration_ui.py    # [通用工具] 交互式校准界面
+│   └── reporter.py          # [通用工具] 调试报告生成器 (离场检测报告、统计输出)
+├── model/
+│   └── yolov8n.pt           # [模型文件] YOLOv8模型
+├── video/
+│   └── input_video.mp4      # [视频文件] 测试视频
+├── main.py                  # [入口] 程序主调度
+├── requirements.txt
+└── README.md

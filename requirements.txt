@@ -1,0 +1,5 @@
+hyperlpr3
+numpy
+opencv_python
+supervision
+ultralytics

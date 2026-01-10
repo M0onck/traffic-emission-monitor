@@ -1,0 +1,38 @@
+# --- Python 通用忽略 ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+venv/
+env/
+.venv/
+
+# --- IDE 配置文件 (可选) ---
+.vscode/
+.idea/
+*.swp
+
+# --- 操作系统文件 ---
+.DS_Store
+Thumbs.db
+
+# --- 项目特定忽略 (关键部分) ---
+# 1. 忽略视频文件 (体积过大，且涉及隐私或版权)
+video/*.mp4
+video/*.avi
+video/*.mov
+# 保留 video 文件夹本身 (通过保留一个空文件，可选)
+!video/.gitkeep
+
+# 2. 忽略数据库文件 (这是运行时生成的动态数据)
+data/*.db
+data/*.sqlite
+
+# 3. 忽略模型文件 (如果使用标准模型，建议忽略；如果是自己训练的，且小于100M可保留)
+model/*.pt
+model/*.onnx
+
+# 4. 忽略其他可能的输出
+*.log
+output/
