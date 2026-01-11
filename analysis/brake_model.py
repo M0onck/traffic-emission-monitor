@@ -1,4 +1,5 @@
 import config.settings as cfg
+from core.classifier import VehicleClassifier
 
 class BrakeEmissionModel:
     """
@@ -6,38 +7,6 @@ class BrakeEmissionModel:
     """
     def __init__(self):
         pass
-
-    def _determine_vehicle_type(self, yolo_class_id, plate_color):
-        """
-        根据 YOLO 类别和车牌颜色判定车辆排放类型。
-        策略：最大似然估计 (MLE)
-        1. 有车牌颜色 -> 查表 (精确)
-        2. 无车牌颜色 -> 基于车型先验概率 (Bus->电, Truck->油, Car->油)
-        """
-        # 1. 尝试精确匹配 (ClassID, Color)
-        # 例如: (5, 'Green') -> HDV-electric
-        key = (yolo_class_id, plate_color)
-        if key in cfg.TYPE_MAP: 
-            return cfg.TYPE_MAP[key]
-            
-        # 2. 兜底逻辑 (当 OCR 关闭 或 OCR 识别失败时)
-        
-        # 2.1 小型车 (Car/Taxi/SUV) -> 默认为汽油车
-        if yolo_class_id == 2: 
-            return cfg.TYPE_MAP.get('Default_Car', 'LDV-gasoline')
-            
-        # 2.2 大型车分流策略 (核心修改)
-        if yolo_class_id == 5: # Bus (公交车/大巴)
-            # 中国城市工况下，绝大多数公交为电动
-            return "HDV-electric" 
-            
-        if yolo_class_id == 7: # Truck (卡车/货车)
-            # 物流运输工况下，绝大多数卡车仍为柴油
-            # (即使是 HDV-diesel，也比错误的归类为 electric 更安全，符合保守原则)
-            return "HDV-diesel"
-            
-        # 2.3 极少数其他情况 (如 Person 误检等)，使用配置文件的总兜底
-        return cfg.TYPE_MAP.get('Default_Heavy', 'HDV-diesel')
 
     def _determine_opmode(self, v, a, vsp):
         """
@@ -67,13 +36,13 @@ class BrakeEmissionModel:
         id_to_class = {tid: cid for tid, cid in zip(detections.tracker_id, detections.class_id)}
 
         for tid, data in kinematics_data.items():
-            class_id = int(id_to_class.get(tid, 2))
+            class_id = int(id_to_class.get(tid, cfg.YOLO_CLASS_CAR))
             
             # 如果 OCR 关闭或无记录，plate_color 为 Unknown
             plate_color = plate_cache.get(tid, "Unknown")
             
-            # 1. 类型判定 (现在会正确返回 HDV-diesel)
-            type_str = self._determine_vehicle_type(class_id, plate_color)
+            # 1. 调用公共分类器进行类型判定
+            _, type_str = VehicleClassifier.resolve_type(class_id, plate_color_override=plate_color)
             
             # 2. 物理参数修正
             # 只有明确标记为 electric 的才应用 EV 质量修正

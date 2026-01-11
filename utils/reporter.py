@@ -1,5 +1,6 @@
 from collections import defaultdict
 import config.settings as cfg
+from core.classifier import VehicleClassifier
 
 class Reporter:
     """
@@ -23,7 +24,6 @@ class Reporter:
         if life_span < cfg.MIN_SURVIVAL_FRAMES:
             return 
 
-        yolo_name = record.get('class_name', 'Unknown')
         history = record.get('plate_history', [])
         final_plate = "Unknown"
         vote_info = "无识别记录"
@@ -46,36 +46,11 @@ class Reporter:
                 vote_info = f"得分 {int(scores[winner]/1000)}k (占比 {confidence:.1%})"
 
         # 4. 最终归类逻辑 (Type Classification)
-        final_type = "Calculating..."
-        
-        # 情况 A: 成功识别到车牌 (精确)
-        if final_plate != "Unknown":
-            if final_plate == "Green": final_type = "LDV-electric"
-            elif final_plate == "Yellow": final_type = "HDV-diesel"
-            elif final_plate == "Blue": final_type = "LDV-gasoline"
-            else: final_type = f"{final_plate}?"
-            
-            # 特殊逻辑: 大车 + 绿牌 = 重型电动车
-            if record.get('class_id') in [5, 7] and final_plate == "Green":
-                final_type = "HDV-electric (Large EV)"
-                
-        # 情况 B: 无车牌信息 (兜底策略)
-        else:
-            # 区分是 OCR 没开还是没识别出来，仅用于显示后缀
-            suffix = "(Default)" if not cfg.ENABLE_OCR else "(Fallback)"
-            class_id = record.get('class_id')
-            
-            if class_id == 2: # Car
-                final_type = f"LDV-gasoline {suffix}"
-            
-            elif class_id == 5: # Bus -> 核心修改：默认电动
-                final_type = f"HDV-electric {suffix}"
-                
-            elif class_id == 7: # Truck -> 核心修改：默认柴油
-                final_type = f"HDV-diesel {suffix}"
-                
-            else:
-                final_type = f"Unknown {suffix}"
+        # 调用公共分类器
+        final_plate, final_type = VehicleClassifier.resolve_type(
+            record.get('class_id'), 
+            plate_history=record.get('plate_history', [])
+        )
 
         # 5. 运动统计
         speed_info = "N/A (Motion Off)"

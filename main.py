@@ -9,6 +9,7 @@ import config.settings as cfg
 from core.geometry import ViewTransformer
 from core.vehicle_registry import VehicleRegistry
 from core.database import DatabaseManager
+from core.classifier import VehicleClassifier
 from perception.kinematics import KinematicsEstimator
 from perception.plate_reader import LicensePlateRecognizer
 from analysis.brake_model import BrakeEmissionModel
@@ -100,7 +101,7 @@ def main():
             # --- Sub-Phase 1.1: 基础感知 ---
             result = model(frame, conf=0.3, iou=0.5, agnostic_nms=True, verbose=False)[0]
             detections = sv.Detections.from_ultralytics(result)
-            detections = detections[np.isin(detections.class_id, [2, 5, 7])] 
+            detections = detections[np.isin(detections.class_id, cfg.YOLO_INTEREST_CLASSES)] 
             detections = byte_tracker.update_with_detections(detections)
             detections = smoother.update_with_detections(detections)
 
@@ -113,7 +114,10 @@ def main():
                     Reporter.print_exit_report(tid, record, kinematics_estimator)
                 
                 # 传入当前模式配置，辅助生成最终状态
-                final_plate, final_type = _resolve_final_status(record, ocr_on)
+                final_plate, final_type = VehicleClassifier.resolve_type(
+                    record['class_id'], 
+                    plate_history=record.get('plate_history', [])
+                )
                 db_manager.insert_macro(tid, record, final_type, final_plate)
 
             # --- Sub-Phase 1.4: 车牌识别 (OCR) ---
@@ -169,7 +173,7 @@ def main():
             # Phase 4: 标签生成 (Label Generation)
             # ------------------------------------------------------
             labels = []
-            # [修正] 同时遍历 tid 和 class_id，以便在缺少高级数据时回退显示 YOLO 类别
+            # 同时遍历 tid 和 class_id，以便在缺少高级数据时回退显示 YOLO 类别
             for tid, class_id in zip(detections.tracker_id, detections.class_id):
                 label_text = f"#{tid}"
                 
@@ -198,20 +202,27 @@ def main():
                     
                     label_text += f" {display_type} | {d['speed']:.1f}m/s {state_tag}"
                 
-                # 情况 B: 仅有运动数据 (显示 YOLO 类别 + 速度)
-                elif tid in kinematics_data:
-                    yolo_class = model.names[class_id]
-                    spd = kinematics_data[tid]['speed']
-                    label_text += f" {yolo_class} | {spd:.1f}m/s"
-                
-                # 情况 C: 仅有 YOLO 检测 (显示 YOLO 类别)
+                # 情况 B: 无排放数据 (例如静止、刚进入或 Motion 关闭)
+                # 我们希望依然能显示正确的车型推断 (Bus->Electric)
                 else:
-                    yolo_class = model.names[class_id]
-                    # 如果 OCR 开启且有缓存，补充显示车牌颜色
-                    if ocr_on and tid in plate_cache:
-                        label_text += f" {yolo_class} ({plate_cache[tid]})"
+                    # 即使没有排放计算，也调用分类器获取显示名称
+                    # 尝试获取历史记录以求更准，如果没有则用当前缓存或空
+                    hist = registry.get_history(tid)
+                    curr_color = plate_cache.get(tid, None)
+
+                    # 优先用历史，其次用当前颜色
+                    _, display_type = VehicleClassifier.resolve_type(
+                        class_id, 
+                        plate_history=hist, 
+                        plate_color_override=curr_color
+                    )
+
+                    # 补充速度信息 (如果有)
+                    if tid in kinematics_data:
+                        spd = kinematics_data[tid]['speed']
+                        label_text += f" {display_type} | {spd:.1f}m/s"
                     else:
-                        label_text += f" {yolo_class}"
+                        label_text += f" {display_type}"
                 
                 labels.append(label_text)
             
@@ -232,55 +243,13 @@ def main():
     for tid, record in registry.check_exits(frame_id + 1000):
         if cfg.DEBUG_MODE:
             Reporter.print_exit_report(tid, record, kinematics_estimator if motion_on else None)
-        final_plate, final_type = _resolve_final_status(record, ocr_on)
+        final_plate, final_type = VehicleClassifier.resolve_type(
+            record['class_id'], 
+            plate_history=record.get('plate_history', [])
+        )
         db_manager.insert_macro(tid, record, final_type, final_plate)
 
     db_manager.close()
-
-# =========================================================================
-# Helper: 解析最终车辆状态
-# =========================================================================
-def _resolve_final_status(record, ocr_enabled):
-    """
-    根据历史记录解析最终的车牌颜色和车辆类型
-    增加 ocr_enabled 标志，用于处理 Mode 3 的默认值逻辑
-    """
-    if not ocr_enabled:
-        # Mode 1 & 3: 无 OCR，直接返回默认值
-        final_plate = "N/A (OCR Off)"
-        if record.get('class_id') in [5, 7]: # Bus/Truck
-            final_type = "HDV-diesel (Default)"
-        else: # Car
-            final_type = "LDV-gasoline (Default)"
-        return final_plate, final_type
-
-    # Mode 2 & 4: 正常 OCR 逻辑
-    history = record.get('plate_history', [])
-    final_plate = "Unknown"
-    
-    if history:
-        scores = defaultdict(float)
-        for e in history: 
-            scores[e['color']] += e['area']
-        if scores: 
-            final_plate = max(scores, key=scores.get)
-
-    final_type = "Calculating..."
-    if final_plate != "Unknown":
-        if final_plate == "Green": final_type = "LDV-electric"
-        elif final_plate == "Yellow": final_type = "HDV-diesel"
-        elif final_plate == "Blue": final_type = "LDV-gasoline"
-        
-        if record.get('class_id') in [5, 7] and final_plate == "Green":
-            final_type = "HDV-electric (Large EV)"
-    else:
-        # OCR 开启但未识别到车牌的兜底
-        if record.get('class_id') in [5, 7]:
-            final_type = "HDV-diesel (Fallback)" # 同样对齐到 Diesel
-        else:
-            final_type = "LDV-gasoline (Fallback)"
-            
-    return final_plate, final_type
 
 if __name__ == "__main__":
     main()

@@ -73,6 +73,14 @@ IDLING_SPEED_THRESHOLD = _e["idling_speed_threshold"]
 LOW_SPEED_THRESHOLD = _e["low_speed_threshold"]
 MASS_FACTOR_EV = _e["mass_factor_ev"]
 
+# =========================================
+# 6. 车型识别参数 (YOLO Class)
+# =========================================
+YOLO_CLASS_CAR = 2
+YOLO_CLASS_BUS = 5
+YOLO_CLASS_TRUCK = 7
+YOLO_INTEREST_CLASSES = [YOLO_CLASS_CAR, YOLO_CLASS_BUS, YOLO_CLASS_TRUCK]
+
 # [数据转换] MOVES 排放因子表
 # 说明: JSON 中 Key 必须为字符串，此处需转换回 int 类型作为 OpMode ID
 MOVES_BRAKE_WEAR_RATES = {}
