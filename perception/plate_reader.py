@@ -1,3 +1,4 @@
+import cv2
 import hyperlpr3
 import numpy as np
 

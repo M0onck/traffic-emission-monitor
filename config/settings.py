@@ -1,115 +1,97 @@
-import numpy as np
+import json
+import os
+import sys
 
 """
 [配置模块] Settings
-功能：集中管理项目的所有超参数、路径配置、物理常数及业务映射关系。
+功能：负责读取外部 config.json 配置文件，并将其解析为 Python 原生数据类型。
+      作为全局参数的单一真值来源 (Source of Truth)。
 """
 
-# =========================================
-# 1. 基础资源配置
-# =========================================
-VIDEO_PATH = "video/input_video.MP4"
-TARGET_VIDEO_PATH = "video/output_video.MP4"
-DB_PATH = "data/traffic_data.db" # 数据库路径
-FPS = 30  # 视频源帧率 (用于时间积分)
+# 配置文件路径
+CONFIG_FILE = "config.json"
 
 # =========================================
-# 2. 运动学估算参数 (Kinematics)
+# 0. 配置加载 (Config Loading)
 # =========================================
-SPEED_WINDOW = 15  # 速度平滑窗口 (帧)，越大越平滑但滞后
-ACCEL_WINDOW = 15  # 加速度计算窗口 (帧)
-
-# =========================================
-# 3. 数据门控与过滤 (Data Gating)
-# =========================================
-# 边缘缓冲区：距离图像边缘多少像素内的目标视为"未完全进入/正在离开"，不计算物理参数
-BORDER_MARGIN = 20
-
-# 预热帧数：新 ID 出现后的前几帧不输出数据 (等待卡尔曼滤波器收敛)
-MIN_TRACKING_FRAMES = 10 
-
-# 物理极限：忽略超过此值的异常加速度 (m/s^2)，用于过滤视觉追踪漂移
-MAX_PHYSICAL_ACCEL = 6.0
-
-# 存活时间阈值：生命周期小于此帧数的轨迹视为噪点 (路标/行人误检)，不产生离场报告
-MIN_SURVIVAL_FRAMES = 30
-
-# 车牌识别门控：车辆 Bounding Box 像素面积小于此值时，不进行 OCR (太小无法识别)
-MIN_PLATE_AREA = 3000
+try:
+    if not os.path.exists(CONFIG_FILE):
+        raise FileNotFoundError(f"配置文件 '{CONFIG_FILE}' 未找到，请确保其位于项目根目录。")
+        
+    with open(CONFIG_FILE, "r", encoding='utf-8') as f:
+        _cfg = json.load(f)
+        
+except Exception as e:
+    print(f"[Error] 配置文件加载失败: {e}")
+    sys.exit(1)
 
 # =========================================
-# 4. MOVES 排放模型参数 (Emission Model)
+# 1. 基础资源配置 (System Resources)
 # =========================================
-# VSP 计算系数
-VSP_COEFF_A = 1.1
-VSP_COEFF_B = 0.132
-VSP_COEFF_C = 0.000302
-
-# 阈值定义
-BRAKING_DECEL_THRESHOLD = -0.89  # m/s^2 (OpMode 0 判定阈值)
-IDLING_SPEED_THRESHOLD = 0.45    # m/s (OpMode 1 判定阈值)
-LOW_SPEED_THRESHOLD = 11.17      # m/s (25 mph, 用于区分低速/高速巡航)
-
-# 新能源增重系数
-MASS_FACTOR_EV = 1.25
-
-# EPA MOVES 刹车磨损排放因子表 (单位: mg/s) ---
-# 参考数据源: MOVES Default Brake Wear Emission Rates (PM2.5)
-# OpMode 说明:
-# 0: Braking (刹车，排放主力)
-# 1: Idling (怠速，无磨损)
-# 11: Coasting (滑行，微量磨损)
-# 21: Cruise/Accel Low Speed (<25mph)
-# 33: Cruise/Accel High Speed (>=25mph)
-
-MOVES_BRAKE_WEAR_RATES = {
-    'LDV': {  # 轻型车 (Light Duty)
-        0:  8.25,   # 刹车时磨损显著
-        1:  0.00,
-        11: 0.05,   # 滑行时有轻微接触
-        21: 0.12,   # 低速巡航/加速 (包含轻微修正刹车)
-        33: 0.18    # 高速巡航 (空气阻力大，修正刹车稍多)
-    },
-    'HDV': {  # 重型车 (Heavy Duty) - 通常是 LDV 的 5-10 倍
-        0:  65.40,  # 重车刹车排放极大
-        1:  0.00,
-        11: 0.40,
-        21: 1.50,
-        33: 2.20
-    }
-}
+VIDEO_PATH = _cfg["system"]["video_path"]
+TARGET_VIDEO_PATH = _cfg["system"]["target_video_path"]
+DB_PATH = _cfg["system"]["db_path"]
+FPS = _cfg["system"]["fps"]
+DEBUG_MODE = _cfg["system"]["debug_mode"]
 
 # =========================================
-# 5. 车辆类型映射策略 (Mapping Strategy)
+# 2. 功能开关 (Feature Switches)
 # =========================================
-# 键格式: (YOLO_Class_ID, Plate_Color)
-# YOLO IDs: 2=Car, 5=Bus, 7=Truck
-TYPE_MAP = {
-    # --- 蓝牌 (Blue): 轻型燃油车 ---
-    (2, 'Blue'): "LDV-gasoline",
-    (5, 'Blue'): "LDV-gasoline",   # 金杯/面包车 (YOLO常识别为Bus)
-    (7, 'Blue'): "LDV-gasoline",   # 皮卡/轻卡 (YOLO常识别为Truck)
-
-    # --- 黄牌 (Yellow): 重型柴油车 ---
-    (2, 'Yellow'): "HDV-diesel",   # 罕见，保守归为重型
-    (5, 'Yellow'): "HDV-diesel",   # 柴油大巴
-    (7, 'Yellow'): "HDV-diesel",   # 重卡
-
-    # --- 绿牌 (Green): 新能源车 ---
-    (2, 'Green'): "LDV-electric",  # 纯电轿车
-    (5, 'Green'): "HDV-electric",  # 电动公交
-    (7, 'Green'): "HDV-electric",  # 电动渣土车/重卡
-
-    # --- 兜底默认值 (Fallback) ---
-    'Default_Car': "LDV-gasoline",
-    'Default_Heavy': "HDV-electric" # [策略] 大车识别失败优先归为电车(尝试捕捉)或柴油(保守)
-}
+ENABLE_MOTION = _cfg["switches"]["enable_motion"]      # 是否开启运动感知 (速度/加速度)
+ENABLE_OCR = _cfg["switches"]["enable_ocr"]            # 是否开启车牌识别
+ENABLE_EMISSION = _cfg["switches"]["enable_emission"]  # 是否开启排放计算
 
 # =========================================
-# 6. 调试与日志参数
+# 3. 运动学参数 (Kinematics)
 # =========================================
-# 是否启用控制台调试打印 (True: 打印离场报告; False: 静默运行)
-DEBUG_MODE = True
+_k = _cfg["kinematics"]
+SPEED_WINDOW = _k["speed_window"]
+ACCEL_WINDOW = _k["accel_window"]
+BORDER_MARGIN = _k["border_margin"]
+MIN_TRACKING_FRAMES = _k["min_tracking_frames"]
+MAX_PHYSICAL_ACCEL = _k["max_physical_accel"]
+MIN_SURVIVAL_FRAMES = _k["min_survival_frames"]
 
-# 最小存活帧数：小于此值的轨迹被视为误检噪声，离场时不打印报告
-MIN_SURVIVAL_FRAMES = 30
+# =========================================
+# 4. 车牌识别参数 (OCR Params)
+# =========================================
+_o = _cfg["ocr_params"]
+MIN_PLATE_AREA = _o["min_plate_area"]
+OCR_RETRY_COOLDOWN = _o["retry_cooldown"]  # OCR 重试冷却 (帧)
+OCR_INTERVAL = _o["run_interval"]          # OCR 运行间隔 (每 N 帧运行一次)
+OCR_CONF_THRESHOLD = _o["confidence_threshold"] # 结果置信度阈值
+
+# =========================================
+# 5. 排放模型参数 (Emission Model)
+# =========================================
+_e = _cfg["emission_params"]
+VSP_COEFF_A = _e["vsp_coeff_a"]
+VSP_COEFF_B = _e["vsp_coeff_b"]
+VSP_COEFF_C = _e["vsp_coeff_c"]
+BRAKING_DECEL_THRESHOLD = _e["braking_decel_threshold"]
+IDLING_SPEED_THRESHOLD = _e["idling_speed_threshold"]
+LOW_SPEED_THRESHOLD = _e["low_speed_threshold"]
+MASS_FACTOR_EV = _e["mass_factor_ev"]
+
+# [数据转换] MOVES 排放因子表
+# 说明: JSON 中 Key 必须为字符串，此处需转换回 int 类型作为 OpMode ID
+MOVES_BRAKE_WEAR_RATES = {}
+for cat, rates in _cfg["moves_brake_wear_rates"].items():
+    MOVES_BRAKE_WEAR_RATES[cat] = {int(k): v for k, v in rates.items()}
+
+# [数据转换] 车辆类型映射策略
+# 说明: 将 "2,Blue" 格式的字符串键转换为 Python 元组 (2, 'Blue')
+TYPE_MAP = {}
+for k, v in _cfg["type_map"].items():
+    if "," in k:
+        parts = k.split(",")
+        # 尝试转换 Class ID (兼容字符串和整数)
+        try:
+            class_id = int(parts[0])
+        except ValueError:
+            class_id = parts[0]
+        color = parts[1]
+        TYPE_MAP[(class_id, color)] = v
+    else:
+        # 处理 Default_Car 等非元组键
+        TYPE_MAP[k] = v

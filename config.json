@@ -1,0 +1,58 @@
+{
+  "system": {
+    "video_path": "video/input_video.MP4",
+    "target_video_path": "video/output_video.MP4",
+    "db_path": "data/traffic_data.db",
+    "fps": 30,
+    "debug_mode": true
+  },
+  "switches": {
+    "enable_motion": true,
+    "enable_ocr": true,
+    "enable_emission": true
+  },
+  "kinematics": {
+    "speed_window": 15,
+    "accel_window": 15,
+    "border_margin": 20,
+    "min_tracking_frames": 10,
+    "max_physical_accel": 6.0,
+    "min_survival_frames": 30
+  },
+  "ocr_params": {
+    "min_plate_area": 3000,
+    "retry_cooldown": 5,
+    "run_interval": 5,
+    "confidence_threshold": 0.4
+  },
+  "emission_params": {
+    "vsp_coeff_a": 1.1,
+    "vsp_coeff_b": 0.132,
+    "vsp_coeff_c": 0.000302,
+    "braking_decel_threshold": -0.89,
+    "idling_speed_threshold": 0.45,
+    "low_speed_threshold": 11.17,
+    "mass_factor_ev": 1.25
+  },
+  "moves_brake_wear_rates": {
+    "LDV": {
+      "0": 8.25, "1": 0.00, "11": 0.05, "21": 0.12, "33": 0.18
+    },
+    "HDV": {
+      "0": 65.40, "1": 0.00, "11": 0.40, "21": 1.50, "33": 2.20
+    }
+  },
+  "type_map": {
+    "2,Blue": "LDV-gasoline",
+    "5,Blue": "LDV-gasoline",
+    "7,Blue": "LDV-gasoline",
+    "2,Yellow": "HDV-diesel",
+    "5,Yellow": "HDV-diesel",
+    "7,Yellow": "HDV-diesel",
+    "2,Green": "LDV-electric",
+    "5,Green": "HDV-electric",
+    "7,Green": "HDV-electric",
+    "Default_Car": "LDV-gasoline",
+    "Default_Heavy": "HDV-diesel"
+  }
+}
