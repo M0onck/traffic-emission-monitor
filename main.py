@@ -10,12 +10,13 @@ from core.geometry import ViewTransformer
 from core.vehicle_registry import VehicleRegistry
 from core.database import DatabaseManager
 from core.classifier import VehicleClassifier
+from core.async_worker import AsyncOCRManager
 from perception.kinematics import KinematicsEstimator
-from perception.plate_reader import LicensePlateRecognizer
 from analysis.brake_model import BrakeEmissionModel
 from utils.visualization import Visualizer, resize_with_pad
 from utils.calibration_ui import CalibrationUI
 from utils.reporter import Reporter
+from utils.optimization import SystemOptimizer
 
 def main():
     # =========================================================================
@@ -23,6 +24,9 @@ def main():
     # =========================================================================
     print(f"\n>>> [系统启动] 正在检查工作模式...")
     
+    # 设置主进程 CPU 亲和性
+    SystemOptimizer.set_cpu_affinity("main")
+
     motion_on = cfg.ENABLE_MOTION
     ocr_on = cfg.ENABLE_OCR
     emission_req = cfg.ENABLE_EMISSION
@@ -70,7 +74,10 @@ def main():
     
     # 按需加载模块
     kinematics_estimator = KinematicsEstimator(cfg.FPS, cfg.SPEED_WINDOW, cfg.ACCEL_WINDOW) if motion_on else None
-    plate_recognizer = LicensePlateRecognizer() if ocr_on else None
+    async_ocr = None
+    if cfg.ENABLE_OCR:
+        async_ocr = AsyncOCRManager()
+        async_ocr.start()
     brake_model = BrakeEmissionModel() if emission_req else None
     
     visualizer = Visualizer(calibration_points=source_points, trace_length=cfg.FPS)
@@ -120,11 +127,14 @@ def main():
                 )
                 db_manager.insert_macro(tid, record, final_type, final_plate)
 
-            # --- Sub-Phase 1.4: 车牌识别 (OCR) ---
-            if ocr_on and (frame_id % cfg.OCR_INTERVAL == 0):
-                for tid, xyxy in zip(detections.tracker_id, detections.xyxy):
-                    if frame_id - plate_retry.get(tid, -999) < cfg.OCR_RETRY_COOLDOWN: continue
+            # --- Sub-Phase 1.4: 生产者 - 推送车牌 OCR 任务 ---
+            if cfg.ENABLE_OCR and (frame_id % cfg.OCR_INTERVAL == 0):
+                for tid, xyxy, class_id in zip(detections.tracker_id, detections.xyxy, detections.class_id):
+                    # 冷却检查
+                    if frame_id - plate_retry.get(tid, -999) < cfg.OCR_RETRY_COOLDOWN: 
+                        continue
                     
+                    # 几何门控 (位置/大小检查)
                     cx, cy = (xyxy[0] + xyxy[2]) / 2, (xyxy[1] + xyxy[3]) / 2
                     x1, y1, x2, y2 = map(int, xyxy)
                     bbox_area = (x2 - x1) * (y2 - y1)
@@ -133,16 +143,28 @@ def main():
                        (0.4 * img_h < cy < 0.98 * img_h) and \
                        (bbox_area > cfg.MIN_PLATE_AREA):
                         
-                        crop = frame[max(0, y1):min(img_h, y2), max(0, x1):min(img_w, x2)]
-                        code, color, conf = plate_recognizer.predict(crop)
-                        plate_retry[tid] = frame_id
-
-                        if color != "Unknown":
-                            registry.add_plate_history(tid, color, bbox_area, conf)
+                        crop = frame[max(0, y1):min(img_h, y2), max(0, x1):min(img_w, x2)].copy()
+                        # 注意：必须使用 .copy()，因为 frame 在主线程会被复写
                         
-                        if color != "Unknown" and conf > cfg.OCR_CONF_THRESHOLD:
-                            plate_cache[tid] = color
-                            if tid in plate_retry: del plate_retry[tid]
+                        # 非阻塞推送任务
+                        success = async_ocr.push_task(tid, crop, class_id)
+                        
+                        if success:
+                            plate_retry[tid] = frame_id # 只有成功放入队列才重置冷却
+            
+            # --- Sub-Phase 1.5: 消费者 - 获取 OCR 结果并更新结果 ---
+            if cfg.ENABLE_OCR:
+                # 每一帧都去检查一下有没有结果回来，这步极快，不卡顿
+                new_results = async_ocr.get_results()
+                for (tid, color, conf, area) in new_results:
+                    # 写入历史记录
+                    registry.add_plate_history(tid, color, area, conf)
+                    
+                    # 更新显示缓存
+                    if conf > cfg.OCR_CONF_THRESHOLD:
+                        plate_cache[tid] = color
+                        # 识别成功，移除重试冷却，允许快速再次确认(可选)
+                        if tid in plate_retry: del plate_retry[tid]
 
             # ------------------------------------------------------
             # Phase 2: 物理估算 (Motion)
@@ -236,7 +258,10 @@ def main():
             cv2.imshow(WINDOW_NAME, display_frame)
             if cv2.waitKey(1) == ord("q"): break
 
-    cv2.destroyAllWindows()
+    # 退出前清理资源
+    if async_ocr:
+        async_ocr.stop() # 关闭线程
+    cv2.destroyAllWindows() # 销毁窗口
     
     # Phase 6: 收尾
     print("\n[处理结束] 正在处理剩余在场车辆...")
