@@ -65,21 +65,40 @@ OCR_CONF_THRESHOLD = _o["confidence_threshold"] # 结果置信度阈值
 # 5. 排放模型参数 (Emission Model)
 # =========================================
 _e = _cfg["emission_params"]
-VSP_COEFF_A = _e["vsp_coeff_a"]
-VSP_COEFF_B = _e["vsp_coeff_b"]
-VSP_COEFF_C = _e["vsp_coeff_c"]
 BRAKING_DECEL_THRESHOLD = _e["braking_decel_threshold"]
 IDLING_SPEED_THRESHOLD = _e["idling_speed_threshold"]
 LOW_SPEED_THRESHOLD = _e["low_speed_threshold"]
 MASS_FACTOR_EV = _e["mass_factor_ev"]
+ROAD_GRADE_PERCENT = _e["road_grade_percent"]
 
 # =========================================
 # 6. 车型识别参数 (YOLO Class)
 # =========================================
-YOLO_CLASS_CAR = 2
-YOLO_CLASS_BUS = 5
-YOLO_CLASS_TRUCK = 7
+_y = _cfg["yolo_classes"]
+YOLO_CLASS_CAR = _y["yolo_class_car"]
+YOLO_CLASS_BUS = _y["yolo_class_bus"]
+YOLO_CLASS_TRUCK = _y["yolo_class_truck"]
 YOLO_INTEREST_CLASSES = [YOLO_CLASS_CAR, YOLO_CLASS_BUS, YOLO_CLASS_TRUCK]
+
+# [数据转换] 动态构建 VSP 系数表
+# 目标: 将 JSON 中的语义键 "car" 转换为实际 ID (如 2)
+VSP_COEFFS = {}
+_vsp_raw = _cfg.get("vsp_coefficients", {})
+
+# 设置默认值
+VSP_COEFFS["default"] = _vsp_raw.get("default", {"a_m": 0.156, "b_m": 0.002, "c_m": 0.0005})
+
+# 动态映射语义键到 ID
+# 映射关系: "car" -> YOLO_CLASS_CAR (2) -> 系数
+semantic_map = {
+    "car": YOLO_CLASS_CAR,
+    "bus": YOLO_CLASS_BUS,
+    "truck": YOLO_CLASS_TRUCK
+}
+
+for sem_key, class_id in semantic_map.items():
+    if sem_key in _vsp_raw:
+        VSP_COEFFS[class_id] = _vsp_raw[sem_key]
 
 # [数据转换] MOVES 排放因子表
 # 说明: JSON 中 Key 必须为字符串，此处需转换回 int 类型作为 OpMode ID

@@ -25,14 +25,23 @@
     "run_interval": 5,
     "confidence_threshold": 0.4
   },
+  "yolo_classes": {
+    "yolo_class_car": 2,
+    "yolo_class_bus": 5,
+    "yolo_class_truck": 7
+  },
   "emission_params": {
-    "vsp_coeff_a": 1.1,
-    "vsp_coeff_b": 0.132,
-    "vsp_coeff_c": 0.000302,
     "braking_decel_threshold": -0.89,
     "idling_speed_threshold": 0.45,
     "low_speed_threshold": 11.17,
-    "mass_factor_ev": 1.25
+    "mass_factor_ev": 1.25,
+    "road_grade_percent": 0.0
+  },
+  "vsp_coefficients": {
+    "car":   {"a_m": 0.1564, "b_m": 0.0020, "c_m": 0.00049},
+    "bus":   {"a_m": 0.1000, "b_m": 0.0000, "c_m": 0.00030},
+    "truck": {"a_m": 0.0920, "b_m": 0.0000, "c_m": 0.00021},
+    "default": {"a_m": 0.1564, "b_m": 0.0020, "c_m": 0.00049}
   },
   "moves_brake_wear_rates": {
     "LDV": {
