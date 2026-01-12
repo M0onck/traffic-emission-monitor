@@ -1,280 +1,110 @@
+import sys
 import cv2
-import numpy as np
 import supervision as sv
 from ultralytics import YOLO
-from collections import defaultdict
 
-# 本地模块导入
+# 导入配置和组件
 import config.settings as cfg
 from core.geometry import ViewTransformer
 from core.vehicle_registry import VehicleRegistry
 from core.database import DatabaseManager
-from core.classifier import VehicleClassifier
 from core.async_worker import AsyncOCRManager
+from core.engine import TrafficMonitorEngine
 from perception.kinematics import KinematicsEstimator
 from analysis.brake_model import BrakeEmissionModel
-from utils.visualization import Visualizer, resize_with_pad
+from utils.visualization import Visualizer
 from utils.calibration_ui import CalibrationUI
-from utils.reporter import Reporter
 from utils.optimization import SystemOptimizer
 
 def main():
-    # =========================================================================
-    # Phase 0: 模式判定与初始化 (Mode Detection & Init)
-    # =========================================================================
-    print(f"\n>>> [系统启动] 正在检查工作模式...")
-    
-    # 设置主进程 CPU 亲和性
+    # 1. 系统初始化
     SystemOptimizer.set_cpu_affinity("main")
+    print(f"\n>>> [System] Initializing Traffic Monitor...", flush=True)
 
-    motion_on = cfg.ENABLE_MOTION
-    ocr_on = cfg.ENABLE_OCR
-    emission_req = cfg.ENABLE_EMISSION
-    
-    # 自动纠正：如果没有运动数据，绝对无法计算排放
-    if emission_req and not motion_on:
-        print("    [警告] 排放计算依赖运动感知，但 Motion 已关闭。排放功能将强制禁用！")
-        emission_req = False
+    try:
+        # 2. 交互式标定
+        calibrator = CalibrationUI(cfg.VIDEO_PATH)
+        source_points, target_points = calibrator.run()
+        print(f">>> [System] 标定完成", flush=True)
 
-    # 判定四大模式
-    mode_id = 0
-    mode_desc = ""
-    
-    if not motion_on and not ocr_on:
-        mode_id = 1
-        mode_desc = "基础流量统计 (仅分车型)"
-    elif not motion_on and ocr_on:
-        mode_id = 2
-        mode_desc = "流量+能源统计 (车型+能源类型)"
-    elif motion_on and not ocr_on:
-        mode_id = 3
-        mode_desc = "流量+运动统计 (车型+运动属性)"
-    elif motion_on and ocr_on:
-        mode_id = 4
-        mode_desc = "全功能模式 (车型+运动+能源+排放)"
+        # 3. 组装组件 (Dependency Injection)
+        print(f">>> [System] 正在组装组件...", flush=True)
+        
+        # 构建排放模型配置 (映射 cfg 常量 -> 字典 key)
+        emission_config = {
+            "braking_decel_threshold": cfg.BRAKING_DECEL_THRESHOLD,
+            "idling_speed_threshold": cfg.IDLING_SPEED_THRESHOLD,
+            "low_speed_threshold": cfg.LOW_SPEED_THRESHOLD,
+            "mass_factor_ev": cfg.MASS_FACTOR_EV,
+            "road_grade_percent": cfg.ROAD_GRADE_PERCENT,
+            "moves_brake_wear_rates": cfg.MOVES_BRAKE_WEAR_RATES,
+            "vsp_coefficients": cfg.VSP_COEFFS
+        }
+        
+        # 构建运动学配置
+        kinematics_config = {
+            "fps": cfg.FPS,
+            "kinematics": {
+                "speed_window": cfg.SPEED_WINDOW,
+                "accel_window": cfg.ACCEL_WINDOW,
+                "border_margin": cfg.BORDER_MARGIN,
+                "min_tracking_frames": cfg.MIN_TRACKING_FRAMES,
+                "max_physical_accel": cfg.MAX_PHYSICAL_ACCEL,
+            }
+        }
 
-    print(f">>> 当前工作模式: [Mode {mode_id}] {mode_desc}")
-    print(f"    - 运动感知: {'[ON]' if motion_on else '[OFF]'}")
-    print(f"    - 车牌识别: {'[ON]' if ocr_on else '[OFF]'}")
-    print(f"    - 排放计算: {'[ON]' if emission_req else '[OFF]'}")
+        components = {
+            'model': YOLO("model/yolov8n.pt"),
+            'tracker': sv.ByteTrack(frame_rate=cfg.FPS),
+            'smoother': sv.DetectionsSmoother(length=3),
+            'transformer': ViewTransformer(source_points, target_points),
+            'visualizer': Visualizer(calibration_points=source_points, trace_length=cfg.FPS),
+            'registry': VehicleRegistry(
+                fps=cfg.FPS,
+                min_survival_frames=cfg.MIN_SURVIVAL_FRAMES,
+                exit_threshold=cfg.EXIT_THRESHOLD
+            ), 
+            'db': DatabaseManager(cfg.DB_PATH)
+        }
 
-    # Mode 3 特殊提示
-    if mode_id == 3 and emission_req:
-        print("\n    [提示] 处于无 OCR 隐私模式。排放计算将使用默认能源类型假设：")
-        print("          * 小型车 (Car)   -> 默认 Gasoline")
-        print("          * 大型车 (Bus/Truck) -> 默认 Diesel")
-
-    # 1. 交互式标定
-    calibrator = CalibrationUI(cfg.VIDEO_PATH)
-    source_points, target_points = calibrator.run()
-    
-    # 2. 核心算法模块初始化
-    model = YOLO("model/yolov8n.pt") 
-    view_transformer = ViewTransformer(source_points, target_points)
-    
-    # 按需加载模块
-    kinematics_estimator = KinematicsEstimator(cfg.FPS, cfg.SPEED_WINDOW, cfg.ACCEL_WINDOW) if motion_on else None
-    async_ocr = None
-    if cfg.ENABLE_OCR:
-        async_ocr = AsyncOCRManager()
-        async_ocr.start()
-    brake_model = BrakeEmissionModel() if emission_req else None
-    
-    visualizer = Visualizer(calibration_points=source_points, trace_length=cfg.FPS)
-    byte_tracker = sv.ByteTrack(frame_rate=cfg.FPS)
-    smoother = sv.DetectionsSmoother(length=3)
-
-    plate_cache = {}    
-    plate_retry = {}    
-    
-    registry = VehicleRegistry()
-    db_manager = DatabaseManager(cfg.DB_PATH)
-    print(f">>> 数据库已连接: {cfg.DB_PATH}\n")
-    
-    # =========================================================================
-    # Phase 1: 视频流处理循环
-    # =========================================================================
-    video_info = sv.VideoInfo.from_video_path(cfg.VIDEO_PATH)
-    WINDOW_NAME = "Traffic Emission Monitor"
-    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(WINDOW_NAME, 1280, 720)
-
-    frame_id = 0
-    with sv.VideoSink(cfg.TARGET_VIDEO_PATH, video_info=video_info) as sink:
-        for frame in sv.get_video_frames_generator(cfg.VIDEO_PATH):
-            frame_id += 1
-            img_h, img_w = frame.shape[:2]
+        # 按需加载可选组件
+        if cfg.ENABLE_MOTION:
+            components['kinematics'] = KinematicsEstimator(config=kinematics_config)
+        
+        if cfg.ENABLE_EMISSION and cfg.ENABLE_MOTION:
+            components['brake_model'] = BrakeEmissionModel(config=emission_config)
             
-            # --- Sub-Phase 1.1: 基础感知 ---
-            result = model(frame, conf=0.3, iou=0.5, agnostic_nms=True, verbose=False)[0]
-            detections = sv.Detections.from_ultralytics(result)
-            detections = detections[np.isin(detections.class_id, cfg.YOLO_INTEREST_CLASSES)] 
-            detections = byte_tracker.update_with_detections(detections)
-            detections = smoother.update_with_detections(detections)
+        if cfg.ENABLE_OCR:
+            print(f">>> [System] 启动 OCR 进程...", flush=True)
+            ocr_worker = AsyncOCRManager()
+            ocr_worker.start()
+            components['ocr_worker'] = ocr_worker
 
-            # --- Sub-Phase 1.2: 注册表更新 ---
-            registry.update(detections, frame_id, model)
+        # 4. 启动引擎
+        print(f">>> [System] 初始化引擎 (TrafficMonitorEngine)...", flush=True)
+        engine = TrafficMonitorEngine(config=cfg, components=components)
+        
+        print(f">>> [System] 进入主循环 (Engine.run)...", flush=True)
+        engine.run()
 
-            # --- Sub-Phase 1.3: 离场检测 ---
-            for tid, record in registry.check_exits(frame_id):
-                if cfg.DEBUG_MODE:
-                    Reporter.print_exit_report(tid, record, kinematics_estimator)
-                
-                # 传入当前模式配置，辅助生成最终状态
-                final_plate, final_type = VehicleClassifier.resolve_type(
-                    record['class_id'], 
-                    plate_history=record.get('plate_history', [])
-                )
-                db_manager.insert_macro(tid, record, final_type, final_plate)
-
-            # --- Sub-Phase 1.4: 生产者 - 推送车牌 OCR 任务 ---
-            if cfg.ENABLE_OCR and (frame_id % cfg.OCR_INTERVAL == 0):
-                for tid, xyxy, class_id in zip(detections.tracker_id, detections.xyxy, detections.class_id):
-                    # 冷却检查
-                    if frame_id - plate_retry.get(tid, -999) < cfg.OCR_RETRY_COOLDOWN: 
-                        continue
-                    
-                    # 几何门控 (位置/大小检查)
-                    cx, cy = (xyxy[0] + xyxy[2]) / 2, (xyxy[1] + xyxy[3]) / 2
-                    x1, y1, x2, y2 = map(int, xyxy)
-                    bbox_area = (x2 - x1) * (y2 - y1)
-
-                    if (0.1 * img_w < cx < 0.9 * img_w) and \
-                       (0.4 * img_h < cy < 0.98 * img_h) and \
-                       (bbox_area > cfg.MIN_PLATE_AREA):
-                        
-                        crop = frame[max(0, y1):min(img_h, y2), max(0, x1):min(img_w, x2)].copy()
-                        # 注意：必须使用 .copy()，因为 frame 在主线程会被复写
-                        
-                        # 非阻塞推送任务
-                        success = async_ocr.push_task(tid, crop, class_id)
-                        
-                        if success:
-                            plate_retry[tid] = frame_id # 只有成功放入队列才重置冷却
+    except KeyboardInterrupt:
+        print("\n[System] 用户中断，停止运行。", flush=True)
+        # 安全退出
+        if 'engine' in locals(): engine.cleanup(0)
             
-            # --- Sub-Phase 1.5: 消费者 - 获取 OCR 结果并更新结果 ---
-            if cfg.ENABLE_OCR:
-                # 每一帧都去检查一下有没有结果回来，这步极快，不卡顿
-                new_results = async_ocr.get_results()
-                for (tid, color, conf, area) in new_results:
-                    # 写入历史记录
-                    registry.add_plate_history(tid, color, area, conf)
-                    
-                    # 更新显示缓存
-                    if conf > cfg.OCR_CONF_THRESHOLD:
-                        plate_cache[tid] = color
-                        # 识别成功，移除重试冷却，允许快速再次确认(可选)
-                        if tid in plate_retry: del plate_retry[tid]
-
-            # ------------------------------------------------------
-            # Phase 2: 物理估算 (Motion)
-            # ------------------------------------------------------
-            kinematics_data = {}
-            if motion_on:
-                points = detections.get_anchors_coordinates(anchor=sv.Position.BOTTOM_CENTER)
-                points_transformed = view_transformer.transform_points(points)
-                kinematics_data = kinematics_estimator.update(detections, points_transformed, frame.shape)
-            
-            # ------------------------------------------------------
-            # Phase 3: 排放分析 (Emission)
-            # ------------------------------------------------------
-            emission_data = {}
-            # 只有在 (需要排放计算) AND (有运动数据) 时才执行
-            if emission_req and motion_on:
-                # 注意：如果 ocr_on 为 False，plate_cache 将为空，
-                # BrakeModel 内部会自动 fallback 到 Default_Car/Default_Heavy
-                emission_data = brake_model.process(kinematics_data, detections, plate_cache)
-                
-                for tid, d in emission_data.items():
-                    registry.update_emission_stats(tid, d['op_mode'], d['emission_rate'])
-                    record = registry.get_record(tid)
-                    if record and (frame_id - record['first_frame'] > 5):
-                        db_manager.insert_micro(frame_id, tid, d)
-            
-            # ------------------------------------------------------
-            # Phase 4: 标签生成 (Label Generation)
-            # ------------------------------------------------------
-            labels = []
-            # 同时遍历 tid 和 class_id，以便在缺少高级数据时回退显示 YOLO 类别
-            for tid, class_id in zip(detections.tracker_id, detections.class_id):
-                label_text = f"#{tid}"
-                
-                # 情况 A: 排放数据可用 (显示最详细的推断类型)
-                if tid in emission_data:
-                    d = emission_data[tid]
-                    display_type = d['type_str'] # e.g., "HDV-diesel", "LDV-gasoline"
-                    
-                    # [修复] 如果 OCR 关闭，仅追加 (Def) 标记，保留 LDV/HDV 前缀
-                    if not ocr_on: 
-                        # 避免重复添加后缀 (BrakeModel 有时会返回带 Default 的字串)
-                        if "(Def" not in display_type and "(Fall" not in display_type:
-                             display_type += "(Def)"
-                    # 如果 OCR 开启但识别失败，尝试用历史推断优化显示
-                    elif tid not in plate_cache:
-                        hist = registry.get_history(tid)
-                        if hist:
-                            scores = defaultdict(float)
-                            for h in hist: scores[h['color']] += h['area']
-                            best = max(scores, key=scores.get)
-                            display_type = f"{best}?" # e.g. "Blue?"
-
-                    # 状态标签
-                    state_tag = "[BRAKE]" if d['op_mode'] == 0 else \
-                                "[IDLE]" if d['op_mode'] == 1 else "[GO]"
-                    
-                    label_text += f" {display_type} | {d['speed']:.1f}m/s {state_tag}"
-                
-                # 情况 B: 无排放数据 (例如静止、刚进入或 Motion 关闭)
-                # 我们希望依然能显示正确的车型推断 (Bus->Electric)
-                else:
-                    # 即使没有排放计算，也调用分类器获取显示名称
-                    # 尝试获取历史记录以求更准，如果没有则用当前缓存或空
-                    hist = registry.get_history(tid)
-                    curr_color = plate_cache.get(tid, None)
-
-                    # 优先用历史，其次用当前颜色
-                    _, display_type = VehicleClassifier.resolve_type(
-                        class_id, 
-                        plate_history=hist, 
-                        plate_color_override=curr_color
-                    )
-
-                    # 补充速度信息 (如果有)
-                    if tid in kinematics_data:
-                        spd = kinematics_data[tid]['speed']
-                        label_text += f" {display_type} | {spd:.1f}m/s"
-                    else:
-                        label_text += f" {display_type}"
-                
-                labels.append(label_text)
-            
-            # ------------------------------------------------------
-            # Phase 5: 渲染
-            # ------------------------------------------------------
-            annotated_frame = visualizer.render(frame, detections, labels)
-            sink.write_frame(annotated_frame)
-            
-            display_frame = resize_with_pad(annotated_frame, (1280, 720))
-            cv2.imshow(WINDOW_NAME, display_frame)
-            if cv2.waitKey(1) == ord("q"): break
-
-    # 退出前清理资源
-    if async_ocr:
-        async_ocr.stop() # 关闭线程
-    cv2.destroyAllWindows() # 销毁窗口
-    
-    # Phase 6: 收尾
-    print("\n[处理结束] 正在处理剩余在场车辆...")
-    for tid, record in registry.check_exits(frame_id + 1000):
-        if cfg.DEBUG_MODE:
-            Reporter.print_exit_report(tid, record, kinematics_estimator if motion_on else None)
-        final_plate, final_type = VehicleClassifier.resolve_type(
-            record['class_id'], 
-            plate_history=record.get('plate_history', [])
-        )
-        db_manager.insert_macro(tid, record, final_type, final_plate)
-
-    db_manager.close()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"\n[System] 发生严重错误: {e}", flush=True)
+        
+        # 兜底清理：如果引擎还没初始化就报错了，需要手动关掉 OCR 进程
+        if 'ocr_worker' in locals() and hasattr(ocr_worker, 'stop'):
+            print(">>> [System] 正在强制关闭 OCR 进程...", flush=True)
+            ocr_worker.stop()
+        
+        # 如果引擎已经存在，尝试调用它的清理方法
+        if 'engine' in locals(): 
+            engine.cleanup(0)
 
 if __name__ == "__main__":
     main()

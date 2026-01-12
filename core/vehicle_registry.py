@@ -1,16 +1,22 @@
-import config.settings as cfg
+import numpy as np
 from collections import defaultdict
 
 class VehicleRegistry:
     """
     [核心组件] 车辆注册表
-    功能：管理所有车辆的生命周期（注册、更新、历史记录、离场判定）。
+    已重构：支持依赖注入，内置噪点过滤逻辑
     """
-    def __init__(self):
-        # 核心数据库: {tid: {info...}}
+    def __init__(self, fps: int = 30, min_survival_frames: int = 15, exit_threshold: int = 30):
+        """
+        :param fps: 系统帧率，用于计算时间步长
+        :param min_survival_frames: 最小存活帧数，低于此值的轨迹被视为噪点，离场时不报告
+        :param exit_threshold: 离场判定阈值 (多少帧不见后判定为离开)
+        """
         self.records = {}
-        # 离场阈值
-        self.exit_threshold = 30 
+        # 将配置参数保存为实例变量
+        self.fps = fps
+        self.min_survival_frames = min_survival_frames
+        self.exit_threshold = exit_threshold
 
     def update(self, detections, frame_id, model):
         """
@@ -27,13 +33,12 @@ class VehicleRegistry:
                     'last_seen_frame': frame_id,
                     'reported': False,
                     'plate_history': [],
-                    'op_mode_stats': defaultdict(int), # {OpMode: frames}
-                    'total_emission_mg': 0.0           # 累积排放总量
+                    'op_mode_stats': defaultdict(int),
+                    'total_emission_mg': 0.0
                 }
             else:
                 # 老车更新
                 self.records[tid]['last_seen_frame'] = frame_id
-                # 始终保留最高的置信度对应的分类结果
                 if conf > self.records[tid]['max_conf']:
                     self.records[tid]['max_conf'] = float(conf)
                     self.records[tid]['class_id'] = cid
@@ -45,8 +50,9 @@ class VehicleRegistry:
             self.records[tid]['op_mode_stats'][op_mode] += 1
             
             # 2. 累积排放量 (mg)
+            # 使用 self.fps 计算单帧时间
             # emission_rate 单位是 mg/s，当前是 1 帧，时间为 1/FPS 秒
-            emission_per_frame = emission_rate_mg_s * (1.0 / cfg.FPS)
+            emission_per_frame = emission_rate_mg_s * (1.0 / self.fps)
             self.records[tid]['total_emission_mg'] += emission_per_frame
 
     def add_plate_history(self, tid, color, area, conf):
@@ -61,18 +67,28 @@ class VehicleRegistry:
     def check_exits(self, frame_id):
         """
         检查并返回刚离场的车辆列表
+        在此处使用 min_survival_frames 过滤噪点
         :return: list of (tid, record)
         """
         exited_vehicles = []
         for tid, record in self.records.items():
-            # 如果尚未报告过，且超时未出现
+            # 检查是否满足“消失太久”的离场条件
             if not record['reported'] and (frame_id - record['last_seen_frame'] > self.exit_threshold):
+                # 无论是否是噪点，都标记为 reported，避免下次重复检查
                 record['reported'] = True
-                exited_vehicles.append((tid, record))
+                
+                # 计算车辆生命周期
+                life_span = record['last_seen_frame'] - record['first_frame']
+                
+                # 只有存活够久的车辆才会被返回给 Engine 进行数据库记录
+                if life_span >= self.min_survival_frames:
+                    exited_vehicles.append((tid, record))
+                # else:
+                #     噪点车辆被静默忽略
+                    
         return exited_vehicles
 
     def get_history(self, tid):
-        """获取指定车辆的车牌历史"""
         return self.records.get(tid, {}).get('plate_history', [])
     
     def get_record(self, tid):

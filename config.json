@@ -17,7 +17,8 @@
     "border_margin": 20,
     "min_tracking_frames": 10,
     "max_physical_accel": 6.0,
-    "min_survival_frames": 30
+    "min_survival_frames": 30,
+    "exit_threshold": 30
   },
   "ocr_params": {
     "min_plate_area": 3000,

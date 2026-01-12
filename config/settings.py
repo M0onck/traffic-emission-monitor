@@ -57,6 +57,7 @@ BORDER_MARGIN = _k["border_margin"]
 MIN_TRACKING_FRAMES = _k["min_tracking_frames"]
 MAX_PHYSICAL_ACCEL = _k["max_physical_accel"]
 MIN_SURVIVAL_FRAMES = _k["min_survival_frames"]
+EXIT_THRESHOLD = _k["exit_threshold"]
 
 _o = _cfg["ocr_params"]
 MIN_PLATE_AREA = _o["min_plate_area"]
