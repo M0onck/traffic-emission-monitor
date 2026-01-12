@@ -29,7 +29,7 @@ class BrakeEmissionModel:
 
     def _get_emission_factor(self, op_mode, vehicle_category):
         """查表获取基础排放因子"""
-        rates = cfg.MOVES_BRAKE_WEAR_RATES.get(vehicle_category, cfg.MOVES_BRAKE_WEAR_RATES['LDV'])
+        rates = cfg.MOVES_BRAKE_WEAR_RATES.get(vehicle_category, cfg.MOVES_BRAKE_WEAR_RATES['CAR'])
         return rates.get(op_mode, 0.0)
 
     def _calculate_vsp(self, v, a, class_id):
@@ -74,7 +74,12 @@ class BrakeEmissionModel:
             op_mode = self._determine_opmode(v, a, vsp)
             
             # 4. 排放计算
-            category = 'HDV' if 'HDV' in type_str else 'LDV'
+            if class_id == cfg.YOLO_CLASS_BUS:
+                category = 'BUS'
+            elif class_id == cfg.YOLO_CLASS_TRUCK:
+                category = 'TRUCK'
+            else:
+                category = 'CAR'
             base_emission = self._get_emission_factor(op_mode, category)
             
             # 5. 针对 EV 的最终排放量修正

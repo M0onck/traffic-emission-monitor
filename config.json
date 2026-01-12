@@ -44,23 +44,26 @@
     "default": {"a_m": 0.1564, "b_m": 0.0020, "c_m": 0.00049}
   },
   "moves_brake_wear_rates": {
-    "LDV": {
+    "CAR": {
       "0": 8.25, "1": 0.00, "11": 0.05, "21": 0.12, "33": 0.18
     },
-    "HDV": {
-      "0": 65.40, "1": 0.00, "11": 0.40, "21": 1.50, "33": 2.20
+    "BUS": { 
+      "0": 32.00, "1": 0.00, "11": 0.45, "21": 1.50, "33": 2.10
+    },
+    "TRUCK": { 
+      "0": 26.50, "1": 0.00, "11": 0.35, "21": 1.20, "33": 1.80
     }
   },
   "type_map": {
-    "2,Blue": "LDV-gasoline",
-    "5,Blue": "LDV-gasoline",
-    "7,Blue": "LDV-gasoline",
-    "2,Yellow": "HDV-diesel",
-    "5,Yellow": "HDV-diesel",
-    "7,Yellow": "HDV-diesel",
-    "2,Green": "LDV-electric",
-    "5,Green": "HDV-electric",
-    "7,Green": "HDV-electric",
+    "car,Blue": "Car-gasoline",
+    "bus,Blue": "Bus-gasoline",
+    "truck,Blue": "Truck-gasoline",
+    "car,Yellow": "Car-diesel",
+    "bus,Yellow": "Bus-diesel",
+    "truck,Yellow": "Truck-diesel",
+    "car,Green": "Car-electric",
+    "bus,Green": "Bus-electric",
+    "truck,Green": "Truck-electric",
     "Default_Car": "LDV-gasoline",
     "Default_Heavy": "HDV-diesel"
   }

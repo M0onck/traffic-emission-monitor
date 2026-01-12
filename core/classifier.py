@@ -30,10 +30,10 @@ class VehicleClassifier:
         suffix = "(Default)" # 可以根据是否开启OCR传入不同后缀，这里简化处理
         
         if class_id == cfg.YOLO_CLASS_BUS:   # Bus
-            return final_color, f"HDV-electric {suffix}"
+            return final_color, f"Bus-electric {suffix}"
         elif class_id == cfg.YOLO_CLASS_TRUCK: # Truck
-            return final_color, f"HDV-diesel {suffix}"
+            return final_color, f"Truck-diesel {suffix}"
         elif class_id == cfg.YOLO_CLASS_CAR:   # Car
-            return final_color, f"LDV-gasoline {suffix}"
+            return final_color, f"Car-gasoline {suffix}"
             
         return final_color, cfg.TYPE_MAP.get('Default_Heavy', 'HDV-diesel')

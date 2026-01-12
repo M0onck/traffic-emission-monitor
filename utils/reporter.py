@@ -81,5 +81,5 @@ class Reporter:
         print(f"       车牌: {final_plate} [{vote_info}]")
         print(f"       速度: {speed_info}")
         print(f"       统计: {op_str}")
-        print(f"       排放: 总计 {total_emission:.2f} mg (PM2.5 Brake Wear)")
+        print(f"       排放: 总计 {total_emission:.2f} mg (PM10 Brake Wear)")
         print("-" * 70 + "\n")
