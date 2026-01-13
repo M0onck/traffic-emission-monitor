@@ -115,6 +115,13 @@ class DatabaseManager:
             life_span_frames = record['last_seen_frame'] - record['first_frame']
             duration_sec = life_span_frames / self.fps
             
+            # 计算速度统计
+            max_speed = record.get('max_speed', 0.0)
+            avg_speed = 0.0
+            count = record.get('speed_count', 0)
+            if count > 0:
+                avg_speed = record.get('speed_sum', 0.0) / count
+
             # OpMode 统计转 JSON 字符串
             # 确保 keys/values 都是原生类型
             stats_dict = {int(k): int(v) for k, v in record.get('op_mode_stats', {}).items()}
@@ -133,8 +140,8 @@ class DatabaseManager:
                 int(record['first_frame']),
                 int(record['last_seen_frame']),
                 float(round(duration_sec, 2)),
-                0.0, 
-                0.0, 
+                float(round(avg_speed, 2)), 
+                float(round(max_speed, 2)), 
                 float(round(record.get('total_emission_mg', 0), 2)),
                 op_stats_json
             ))

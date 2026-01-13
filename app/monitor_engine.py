@@ -3,7 +3,6 @@ import numpy as np
 import supervision as sv
 from collections import defaultdict
 from ui.renderer import resize_with_pad, LabelData
-from ui.console_reporter import Reporter
 
 class TrafficMonitorEngine:
     """
@@ -152,7 +151,12 @@ class TrafficMonitorEngine:
     def _save_micro_logs(self, frame_id, emission_data):
         """保存微观数据"""
         for tid, d in emission_data.items():
-            self.registry.update_emission_stats(tid, d['op_mode'], d['emission_rate'])
+            self.registry.update_emission_stats(
+                tid,
+                d['op_mode'],
+                d['emission_rate'],
+                d['speed']
+            )
             rec = self.registry.get_record(tid)
             if rec and (frame_id - rec['first_frame'] > 5):
                 self.db.insert_micro(frame_id, tid, d)

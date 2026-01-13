@@ -33,7 +33,10 @@ class VehicleRegistry:
                     'reported': False,
                     'plate_history': [],
                     'op_mode_stats': defaultdict(int),
-                    'total_emission_mg': 0.0
+                    'total_emission_mg': 0.0,
+                    'max_speed': 0.0,
+                    'speed_sum': 0.0,
+                    'speed_count': 0
                 }
             else:
                 # 老车更新
@@ -43,16 +46,23 @@ class VehicleRegistry:
                     self.records[tid]['class_id'] = cid
                     self.records[tid]['class_name'] = model.names[cid]
 
-    def update_emission_stats(self, tid, op_mode, emission_rate_mg_s):
+    def update_emission_stats(self, tid, op_mode, emission_rate_mg_s, current_speed):
         if tid in self.records:
+            rec = self.records[tid]
             # 1. 累积时间 (帧数)
-            self.records[tid]['op_mode_stats'][op_mode] += 1
+            rec['op_mode_stats'][op_mode] += 1
             
             # 2. 累积排放量 (mg)
             # 使用 self.fps 计算单帧时间
             # emission_rate 单位是 mg/s，当前是 1 帧，时间为 1/FPS 秒
             emission_per_frame = emission_rate_mg_s * (1.0 / self.fps)
-            self.records[tid]['total_emission_mg'] += emission_per_frame
+            rec['total_emission_mg'] += emission_per_frame
+
+            # 3. 更新速度统计
+            if current_speed > rec['max_speed']:
+                rec['max_speed'] = current_speed
+            rec['speed_sum'] += current_speed
+            rec['speed_count'] += 1
 
     def add_plate_history(self, tid, color, area, conf):
         """记录一次有效的车牌识别结果"""
