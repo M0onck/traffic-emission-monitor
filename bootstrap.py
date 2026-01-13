@@ -4,17 +4,20 @@ import supervision as sv
 from ultralytics import YOLO
 
 # 导入配置和组件
-import config.settings as cfg
-from core.geometry import ViewTransformer
-from core.vehicle_registry import VehicleRegistry
-from core.database import DatabaseManager
-from core.async_worker import AsyncOCRManager
-from core.engine import TrafficMonitorEngine
-from perception.kinematics import KinematicsEstimator
-from analysis.brake_model import BrakeEmissionModel
-from utils.visualization import Visualizer
-from utils.calibration_ui import CalibrationUI
-from utils.optimization import SystemOptimizer
+from app.monitor_engine import TrafficMonitorEngine
+from domain.vehicle.repository import VehicleRegistry
+from domain.physics.brake_emission_model import BrakeEmissionModel
+from domain.vehicle.classifier import VehicleClassifier
+import infra.config.loader as cfg
+from infra.concurrency.ocr_worker import AsyncOCRManager
+from infra.store.sqlite_manager import DatabaseManager
+from infra.sys.process_optimizer import SystemOptimizer
+from perception.math.geometry import ViewTransformer
+from perception.kinematics_estimator import KinematicsEstimator
+from ui.renderer import Visualizer
+from ui.calibration_window import CalibrationUI
+from ui.console_reporter import Reporter
+
 
 def main():
     # 1. 系统初始化
@@ -30,7 +33,21 @@ def main():
         # 3. 组装组件 (Dependency Injection)
         print(f">>> [System] 正在组装组件...", flush=True)
         
-        # 构建排放模型配置 (映射 cfg 常量 -> 字典 key)
+        # 构建报告模块配置
+        reporter_config = {
+            "debug_mode": cfg.DEBUG_MODE,
+            "fps": cfg.FPS,
+            "min_survival_frames": cfg.MIN_SURVIVAL_FRAMES
+        }
+
+        # 构建车辆分类器配置
+        classifier_config = {
+            "car": cfg.YOLO_CLASS_CAR,
+            "bus": cfg.YOLO_CLASS_BUS,
+            "truck": cfg.YOLO_CLASS_TRUCK
+        }
+
+        # 构建排放模型配置
         emission_config = {
             "braking_decel_threshold": cfg.BRAKING_DECEL_THRESHOLD,
             "idling_speed_threshold": cfg.IDLING_SPEED_THRESHOLD,
@@ -53,6 +70,7 @@ def main():
             }
         }
 
+        # 加载所有默认组件
         components = {
             'model': YOLO("model/yolov8n.pt"),
             'tracker': sv.ByteTrack(frame_rate=cfg.FPS),
@@ -64,10 +82,14 @@ def main():
                 min_survival_frames=cfg.MIN_SURVIVAL_FRAMES,
                 exit_threshold=cfg.EXIT_THRESHOLD
             ), 
-            'db': DatabaseManager(cfg.DB_PATH)
+            'db': DatabaseManager(db_path=cfg.DB_PATH, fps=cfg.FPS),
+            'classifier': VehicleClassifier(type_map=cfg.TYPE_MAP, yolo_classes=classifier_config)
         }
 
         # 按需加载可选组件
+        if cfg.DEBUG_MODE:
+            components['reporter'] = Reporter(config=reporter_config)
+
         if cfg.ENABLE_MOTION:
             components['kinematics'] = KinematicsEstimator(config=kinematics_config)
         

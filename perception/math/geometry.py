@@ -3,7 +3,7 @@ import numpy as np
 
 class ViewTransformer:
     """
-    [变换器] 视图变换模块。
+    [感知层] 视图变换模块。
     功能：利用单应性矩阵 (Homography)，将图像坐标转换为物理世界坐标。
     """
     def __init__(self, source: np.ndarray, target: np.ndarray):

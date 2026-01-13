@@ -2,13 +2,12 @@ import cv2
 import numpy as np
 import supervision as sv
 from collections import defaultdict
-from utils.visualization import resize_with_pad, LabelData
-from utils.reporter import Reporter
-from core.classifier import VehicleClassifier
+from ui.renderer import resize_with_pad, LabelData
+from ui.console_reporter import Reporter
 
 class TrafficMonitorEngine:
     """
-    [Core] 交通监测引擎
+    [应用层] 交通监测引擎
     封装主循环逻辑，协调各模块工作。
     """
     def __init__(self, config, components):
@@ -25,19 +24,21 @@ class TrafficMonitorEngine:
         self.cfg = config
         self.comps = components
         
-        # 提取高频使用的组件
+        # 提取默认使用的组件
         self.model = components['model']
         self.tracker = components['tracker']
         self.registry = components['registry']
         self.visualizer = components['visualizer']
         self.smoother = components.get('smoother')
         self.db = components['db']
+        self.classifier = components['classifier']
         
         # 状态缓存
         self.plate_cache = {}
         self.plate_retry = {}
         
         # 功能开关
+        self.debug_mode = config.DEBUG_MODE
         self.motion_on = config.ENABLE_MOTION
         self.ocr_on = config.ENABLE_OCR
         self.emission_req = config.ENABLE_EMISSION
@@ -94,9 +95,8 @@ class TrafficMonitorEngine:
         # --- 5. 排放计算 (Emission) ---
         emission_data = {}
         if self.emission_req and self.motion_on and self.comps.get('brake_model'):
-            # 这里调用 process 时传入 Classifier 类
             emission_data = self.comps['brake_model'].process(
-                kinematics_data, detections, self.plate_cache, VehicleClassifier
+                kinematics_data, detections, self.plate_cache, self.classifier
             )
             self._save_micro_logs(frame_id, emission_data)
 
@@ -107,10 +107,14 @@ class TrafficMonitorEngine:
     def _handle_exits(self, frame_id):
         """处理车辆离场"""
         for tid, record in self.registry.check_exits(frame_id):
-            if self.cfg.DEBUG_MODE:
-                Reporter.print_exit_report(tid, record, self.comps.get('kinematics'))
-            
-            final_plate, final_type = VehicleClassifier.resolve_type(
+            if self.debug_mode and self.comps.get('reporter'):
+                self.comps['reporter'].print_exit_report(
+                    tid,
+                    record,
+                    self.comps.get('kinematics'),
+                    self.classifier
+                )
+            final_plate, final_type = self.classifier.resolve_type(
                 record['class_id'], plate_history=record.get('plate_history', [])
             )
             self.db.insert_macro(tid, record, final_type, final_plate)
@@ -174,7 +178,7 @@ class TrafficMonitorEngine:
                 # 回退类型推断
                 hist = self.registry.get_history(tid)
                 color = self.plate_cache.get(tid)
-                _, data.display_type = VehicleClassifier.resolve_type(
+                _, data.display_type = self.classifier.resolve_type(
                     class_id, plate_history=hist, plate_color_override=color
                 )
             

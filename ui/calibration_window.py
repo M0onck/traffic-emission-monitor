@@ -3,7 +3,7 @@ import numpy as np
 
 class CalibrationUI:
     """
-    交互式标定界面
+    [表现层] 交互式标定界面
     功能：允许用户在视频首帧拖动4个角点，定义感兴趣区域 (ROI) 的物理尺寸。
     """
     def __init__(self, video_path: str):

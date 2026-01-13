@@ -2,7 +2,7 @@ import numpy as np
 
 class KalmanFilterCV:
     """
-    [滤波器] 基于常速度模型 (Constant Velocity Model) 的卡尔曼滤波器。
+    [感知层] 基于常速度模型 (Constant Velocity Model) 的卡尔曼滤波器。
     用于平滑视觉检测带来的位置抖动，并估算速度。
     
     状态向量 State x: [pos_x, pos_y, vel_x, vel_y].T

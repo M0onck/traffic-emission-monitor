@@ -1,9 +1,21 @@
-import config.settings as cfg
 from collections import defaultdict
 
 class VehicleClassifier:
-    @staticmethod
-    def resolve_type(class_id, plate_history=None, plate_color_override=None):
+    """
+    [业务层] 车辆类型分类器
+    职责：根据 YOLO 类别、车牌历史和颜色，判定最终的业务车型 (如 'Bus-electric')。
+    """
+    def __init__(self, type_map: dict, yolo_classes: dict):
+        """
+        :param type_map: 映射表 {(class_id, color_str): type_str}
+        :param yolo_classes: 类别ID配置 {'car': 2, 'bus': 5, 'truck': 7}
+        """
+        self.type_map = type_map
+        self.cls_car = yolo_classes.get('car', 2)
+        self.cls_bus = yolo_classes.get('bus', 5)
+        self.cls_truck = yolo_classes.get('truck', 7)
+
+    def resolve_type(self, class_id, plate_history=None, plate_color_override=None):
         """
         统一的车辆类型判定逻辑
         :param class_id: YOLO class ID (int)
@@ -23,17 +35,17 @@ class VehicleClassifier:
             
         # 2. 查表匹配 (优先)
         key = (class_id, final_color)
-        if key in cfg.TYPE_MAP:
-            return final_color, cfg.TYPE_MAP[key]
+        if key in self.type_map:
+            return final_color, self.type_map[key]
             
         # 3. 兜底逻辑 (MLE策略)
         suffix = "(Default)" # 可以根据是否开启OCR传入不同后缀，这里简化处理
         
-        if class_id == cfg.YOLO_CLASS_BUS:   # Bus
+        if class_id == self.cls_bus:   # Bus
             return final_color, f"Bus-electric {suffix}"
-        elif class_id == cfg.YOLO_CLASS_TRUCK: # Truck
+        elif class_id == self.cls_truck: # Truck
             return final_color, f"Truck-diesel {suffix}"
-        elif class_id == cfg.YOLO_CLASS_CAR:   # Car
+        elif class_id == self.cls_car:   # Car
             return final_color, f"Car-gasoline {suffix}"
             
-        return final_color, cfg.TYPE_MAP.get('Default_Heavy', 'HDV-diesel')
+        return final_color, self.type_map.get('Default_Heavy', 'HDV-diesel')

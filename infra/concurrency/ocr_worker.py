@@ -1,13 +1,23 @@
-# core/async_worker.py
 import multiprocessing
 import queue
 import time
 import numpy as np
-# 注意：这里只导入类定义，不要在全局实例化
-from perception.plate_reader import LicensePlateRecognizer
-from utils.optimization import SystemOptimizer
+from perception.lpr_adaptor import LicensePlateRecognizer
+from infra.sys.process_optimizer import SystemOptimizer
+
+"""
+[基础层] 异步 OCR 组件
+功能：封装多进程 OCR 识别逻辑，将 CPU 密集型的车牌识别任务从主线程剥离。
+设计模式：生产者-消费者模式 (Producer-Consumer)
+职责：
+1. 维护独立的 OCR 进程，避免阻塞视频流处理。
+2. 提供线程安全的任务队列 (Task Queue) 和结果队列 (Result Queue)。
+"""
 
 class AsyncOCRManager:
+    """
+    异步车牌识别管理器
+    """
     def __init__(self):
         # 使用 multiprocessing 的 Queue
         # maxsize=3: 稍微减小缓冲，保证只处理最新的，宁缺毋滥
@@ -28,7 +38,7 @@ class AsyncOCRManager:
         print(f">>> [System] OCR 独立进程已启动 (PID: {self.worker_process.pid})")
 
     def stop(self):
-        """停止进程"""
+        """安全停止进程"""
         if self.worker_process and self.worker_process.is_alive():
             self.worker_process.terminate() # 强制结束
             self.worker_process.join()
@@ -36,7 +46,8 @@ class AsyncOCRManager:
 
     def push_task(self, tid, crop, class_id):
         """
-        生产者：主进程调用
+        提交识别任务 (非阻塞)
+        :return: True if pushed, False if queue full
         """
         if self.task_queue.full():
             return False
@@ -51,7 +62,8 @@ class AsyncOCRManager:
 
     def get_results(self):
         """
-        主进程调用：获取结果
+        批量获取已完成的识别结果
+        :return: list of (tracker_id, text, conf, area)
         """
         results = []
         while not self.result_queue.empty():
@@ -65,9 +77,8 @@ class AsyncOCRManager:
     @staticmethod
     def _worker_entry_point(task_q, result_q):
         """
-        【子进程入口】
-        注意：这个函数是在完全独立的进程空间运行的。
-        必须在这里初始化 HyperLPR，不能从外部传进来。
+        [独立进程] 实际运行的消费者循环
+        注意：HyperLPR3 必须在此进程内导入和初始化，不能跨进程共享。
         """
         # 1. 设置子进程 CPU 亲和性
         SystemOptimizer.set_cpu_affinity("worker")

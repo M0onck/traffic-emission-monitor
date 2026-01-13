@@ -4,7 +4,7 @@ import numpy as np
 
 class LicensePlateRecognizer:
     """
-    [感知] 车牌识别包装器 (Wrapper for HyperLPR3)
+    [感知层] 车牌识别包装器 (Wrapper for HyperLPR3)
     功能：识别车辆图片中的车牌，并返回标准化的颜色类别。
     """
     def __init__(self):

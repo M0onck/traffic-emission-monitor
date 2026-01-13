@@ -2,18 +2,17 @@ import sqlite3
 import json
 import os
 from typing import List, Dict, Any
-import config.settings as cfg
 
 class DatabaseManager:
     """
-    [核心] SQLite 数据库管理器
+    [基础层] SQLite 数据库管理器
     功能：负责微观数据的批量写入和宏观数据的汇总存储。
-    修正：增加了对 NumPy 数据类型的强制转换，防止 datatype mismatch。
     """
-    def __init__(self, db_path: str = "data/traffic_data.db"):
+    def __init__(self, db_path: str = "data/traffic_data.db", fps: float = 30.0):
         # 确保目录存在
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         
+        self.fps = fps
         self.conn = sqlite3.connect(db_path)
         self.cursor = self.conn.cursor()
         
@@ -73,13 +72,13 @@ class DatabaseManager:
         """
         添加一条微观记录到缓冲区
         """
-        # [修复] 强制转换为原生类型，避免 numpy 类型导致的数据库错误
+        # 强制转换为原生类型，避免 numpy 类型导致的数据库错误
         row = (
             int(frame_id),
-            int(tid),               # numpy.int -> int
+            int(tid),
             str(data['type_str']),
             str(data['plate_color']),
-            float(round(data['speed'], 2)), # numpy.float -> float
+            float(round(data['speed'], 2)),
             float(round(data['accel'], 2)),
             float(round(data['vsp'], 2)),
             int(data['op_mode']),
@@ -114,7 +113,7 @@ class DatabaseManager:
         try:
             # 计算统计量
             life_span_frames = record['last_seen_frame'] - record['first_frame']
-            duration_sec = life_span_frames / cfg.FPS
+            duration_sec = life_span_frames / self.fps
             
             # OpMode 统计转 JSON 字符串
             # 确保 keys/values 都是原生类型
@@ -128,7 +127,7 @@ class DatabaseManager:
                     avg_speed, max_speed, total_emission_mg, op_mode_stats
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                int(tid), # [修复] 关键: Primary Key 必须是原生 int
+                int(tid),
                 str(final_type),
                 str(final_plate),
                 int(record['first_frame']),
@@ -136,7 +135,7 @@ class DatabaseManager:
                 float(round(duration_sec, 2)),
                 0.0, 
                 0.0, 
-                float(round(record.get('total_emission_mg', 0), 2)), # [修复] numpy.float -> float
+                float(round(record.get('total_emission_mg', 0), 2)),
                 op_stats_json
             ))
             self.conn.commit()

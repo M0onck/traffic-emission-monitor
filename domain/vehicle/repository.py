@@ -3,8 +3,7 @@ from collections import defaultdict
 
 class VehicleRegistry:
     """
-    [核心组件] 车辆注册表
-    已重构：支持依赖注入，内置噪点过滤逻辑
+    [业务层] 车辆注册表
     """
     def __init__(self, fps: int = 30, min_survival_frames: int = 15, exit_threshold: int = 30):
         """

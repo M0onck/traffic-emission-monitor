@@ -1,5 +1,6 @@
 hyperlpr3
 numpy
 opencv_python
+psutil
 supervision
 ultralytics

@@ -2,8 +2,7 @@ import numpy as np
 
 class BrakeEmissionModel:
     """
-    [业务] 刹车磨损排放模型 (Based on MOVES)
-    已重构：支持依赖注入
+    [业务层] 刹车磨损排放模型 (Based on MOVES)
     """
     def __init__(self, config: dict):
         """

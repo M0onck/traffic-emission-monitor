@@ -3,10 +3,20 @@ import os
 import platform
 import math
 
+"""
+[基础层] 系统进程优化器
+功能：负责操作系统级别的进程优先级调整与 CPU 核心亲和性绑定。
+职责：
+1. 提升主进程的 CPU 优先级，减少视频丢帧。
+2. 将主进程绑定到特定 CPU 核心（通常是性能核），避免频繁上下文切换。
+3. 屏蔽 Windows/Linux 的底层 API 差异。
+"""
+
 class SystemOptimizer:
     @staticmethod
     def set_cpu_affinity(role: str):
         """
+        设置当前进程的 CPU 亲和性与优先级
         根据 CPU 核心数进行 50/50 资源划分。
         策略：
         - 单核环境：不进行绑定，完全由 OS 调度。

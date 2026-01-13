@@ -3,6 +3,15 @@ import numpy as np
 import supervision as sv
 from dataclasses import dataclass
 
+"""
+[表现层] 视频渲染器
+功能：负责将检测结果、轨迹、车辆信息及统计数据绘制到视频帧上。
+职责：
+1. LabelFormatter: 负责将业务数据 (Data Objects) 格式化为人类可读的字符串。
+2. Visualizer: 负责调用 OpenCV/Supervision 进行实际的图形绘制（框、标签、轨迹）。
+依赖：仅依赖数据对象，不包含业务计算逻辑。
+"""
+
 @dataclass
 class LabelData:
     """传输给显示层的数据对象"""
@@ -14,7 +23,7 @@ class LabelData:
 
 class LabelFormatter:
     """
-    [工具] 标签格式化器
+    标签格式化器
     负责将业务数据转换为屏幕显示的字符串
     """
     def __init__(self, show_emission: bool = True):
@@ -43,6 +52,9 @@ class LabelFormatter:
         return label
 
 class Visualizer:
+    """
+    核心渲染器
+    """
     def __init__(self, calibration_points: np.ndarray, trace_length: int = 30):
         self.calibration_points = calibration_points.astype(np.int32)
         # 注入 LabelFormatter
@@ -59,7 +71,11 @@ class Visualizer:
 
     def render(self, frame: np.ndarray, detections: sv.Detections, label_data_list: list) -> np.ndarray:
         """
-        :param label_data_list: List[LabelData] 对应 detections 的顺序
+        绘制单帧画面
+        :param frame: 原始视频帧
+        :param detections: 目标检测结果 (Supervision Detections)
+        :param label_data_list: 对应每个检测目标的标签数据列表
+        :return: 绘制完成的图像
         """
         scene = frame.copy()
         
@@ -79,7 +95,9 @@ class Visualizer:
         return scene
 
 def resize_with_pad(image: np.ndarray, target_size: tuple) -> np.ndarray:
-    # 保持原有的 resize 逻辑
+    """
+    工具函数：保持纵横比缩放并填充黑边
+    """
     h, w = image.shape[:2]
     target_w, target_h = target_size
     scale = min(target_w / w, target_h / h)

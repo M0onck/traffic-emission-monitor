@@ -3,7 +3,7 @@ import os
 import sys
 
 """
-[配置模块] Settings
+[基础层] 配置文件读取器
 功能：负责读取外部 config.json 配置文件，并将其解析为 Python 原生数据类型。
       作为全局参数的单一真值来源 (Source of Truth)。
 

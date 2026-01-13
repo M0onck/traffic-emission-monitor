@@ -1,11 +1,10 @@
 import numpy as np
 from collections import deque
-from core.filters import KalmanFilterCV
+from perception.math.kalman_filter import KalmanFilterCV
 
 class KinematicsEstimator:
     """
-    [感知] 运动学估算器
-    已重构：支持依赖注入
+    [感知层] 运动学估算器
     """
     def __init__(self, config: dict):
         """

@@ -1,14 +1,19 @@
 from collections import defaultdict
-import config.settings as cfg
-from core.classifier import VehicleClassifier
 
 class Reporter:
     """
-    [工具] 调试报告生成器
+    [表现层] 调试报告生成器
     功能：负责格式化并打印车辆离场时的详细数据报告。
     """
-    @staticmethod
-    def print_exit_report(tid, record, kinematics_estimator):
+    def __init__(self, config: dict):
+        """
+        :param config: 包含 debug_mode, fps, min_survival_frames 的字典
+        """
+        self.debug_mode = config.get('debug_mode', False)
+        self.fps = config.get('fps', 30)
+        self.min_survival_frames = config.get('min_survival_frames', 30)
+
+    def print_exit_report(self, tid, record, kinematics_estimator, vehicle_classifier):
         """
         打印离场车辆的详细分析报告
         :param tid: 车辆追踪 ID
@@ -16,12 +21,12 @@ class Reporter:
         :param kinematics_estimator: 用于获取运动历史 (可能为 None)
         """
         # 1. 检查配置开关
-        if not cfg.DEBUG_MODE:
+        if not self.debug_mode:
             return
 
         # 2. 噪点过滤 (存活时间过短)
         life_span = record.get('last_seen_frame', 0) - record.get('first_frame', 0)
-        if life_span < cfg.MIN_SURVIVAL_FRAMES:
+        if life_span < self.min_survival_frames:
             return 
 
         history = record.get('plate_history', [])
@@ -47,7 +52,7 @@ class Reporter:
 
         # 4. 最终归类逻辑 (Type Classification)
         # 调用公共分类器
-        final_plate, final_type = VehicleClassifier.resolve_type(
+        final_plate, final_type = vehicle_classifier.resolve_type(
             record.get('class_id'), 
             plate_history=record.get('plate_history', [])
         )
@@ -66,7 +71,7 @@ class Reporter:
         # 格式化 OpMode 时间 (帧数 -> 秒)
         op_summary = []
         for mode in sorted(op_stats.keys()):
-            seconds = op_stats[mode] / cfg.FPS
+            seconds = op_stats[mode] / self.fps
             mode_name = {
                 0: "Braking", 1: "Idling", 11: "Coast", 
                 21: "Cruise(L)", 33: "Cruise(H)"
@@ -77,7 +82,7 @@ class Reporter:
 
         # 7. 执行打印
         print("-" * 70)
-        print(f"[离场] ID: {tid} | 存活: {life_span/cfg.FPS:.1f}s | 类型: {final_type}")
+        print(f"[离场] ID: {tid} | 存活: {life_span/self.fps:.1f}s | 类型: {final_type}")
         print(f"       车牌: {final_plate} [{vote_info}]")
         print(f"       速度: {speed_info}")
         print(f"       统计: {op_str}")
