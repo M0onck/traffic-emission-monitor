@@ -66,7 +66,8 @@ class Reporter:
 
         # 6. 排放与工况统计
         op_stats = record.get('op_mode_stats', {})
-        total_emission = record.get('total_emission_mg', 0.0)
+        total_brake = record.get('brake_emission_mg', 0.0)
+        total_tire = record.get('tire_emission_mg', 0.0)
         
         # 格式化 OpMode 时间 (帧数 -> 秒)
         op_summary = []
@@ -86,5 +87,5 @@ class Reporter:
         print(f"       车牌: {final_plate} [{vote_info}]")
         print(f"       速度: {speed_info}")
         print(f"       统计: {op_str}")
-        print(f"       排放: 总计 {total_emission:.2f} mg (PM10 Brake Wear)")
+        print(f"       排放: 刹车 {total_brake:.2f} mg | 轮胎 {total_tire:.2f} mg (PM10)")
         print("-" * 70 + "\n")

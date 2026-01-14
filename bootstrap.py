@@ -6,7 +6,9 @@ from ultralytics import YOLO
 # 导入配置和组件
 from app.monitor_engine import TrafficMonitorEngine
 from domain.vehicle.repository import VehicleRegistry
+from domain.physics.vsp_calculator import VSPCalculator
 from domain.physics.brake_emission_model import BrakeEmissionModel
+from domain.physics.tire_emission_model import TireEmissionModel
 from domain.vehicle.classifier import VehicleClassifier
 import infra.config.loader as cfg
 from infra.concurrency.ocr_worker import AsyncOCRManager
@@ -47,15 +49,25 @@ def main():
             "truck": cfg.YOLO_CLASS_TRUCK
         }
 
-        # 构建排放模型配置
-        emission_config = {
+        # 构建 VSP 计算器配置
+        vsp_config = {
+            "vsp_coefficients": cfg.VSP_COEFFS,
+            "road_grade_percent": cfg.ROAD_GRADE_PERCENT
+        }
+
+        # 构建刹车磨损排放模型配置
+        brake_emission_config = {
             "braking_decel_threshold": cfg.BRAKING_DECEL_THRESHOLD,
             "idling_speed_threshold": cfg.IDLING_SPEED_THRESHOLD,
             "low_speed_threshold": cfg.LOW_SPEED_THRESHOLD,
             "mass_factor_ev": cfg.MASS_FACTOR_EV,
-            "road_grade_percent": cfg.ROAD_GRADE_PERCENT,
-            "moves_brake_wear_rates": cfg.MOVES_BRAKE_WEAR_RATES,
-            "vsp_coefficients": cfg.VSP_COEFFS
+            "moves_brake_wear_rates": cfg.MOVES_BRAKE_WEAR_RATES
+        }
+
+        # 构建轮胎磨损排放模型配置
+        tire_emission_config = {
+            "tire_wear_model": cfg.TIRE_WEAR_MODEL,
+            "emission_params": cfg._e
         }
         
         # 构建运动学配置
@@ -94,7 +106,9 @@ def main():
             components['kinematics'] = KinematicsEstimator(config=kinematics_config)
         
         if cfg.ENABLE_EMISSION and cfg.ENABLE_MOTION:
-            components['brake_model'] = BrakeEmissionModel(config=emission_config)
+            components['vsp_calculator'] = VSPCalculator(config=vsp_config)
+            components['brake_model'] = BrakeEmissionModel(config=brake_emission_config)
+            components['tire_model'] = TireEmissionModel(config=tire_emission_config)
             
         if cfg.ENABLE_OCR:
             print(f">>> [System] 启动 OCR 进程...", flush=True)

@@ -148,3 +148,14 @@ for key_str, type_val in _type_map_raw.items():
     else:
         # 处理普通键 (如 "Default_Car", "Default_Heavy")
         TYPE_MAP[key_str] = type_val
+
+# ==============================================================================
+# Phase 4: 轮胎模型配置
+# ==============================================================================
+# 直接读取整个字典，稍后注入到模型类中处理
+TIRE_WEAR_MODEL = _cfg.get("tire_wear_model", {})
+
+# 确保它包含了 emission_params 以便 OpModeCalculator 使用
+# (如果 TireModel 内部需要初始化 OpModeCalculator)
+if "emission_params" not in TIRE_WEAR_MODEL:
+    TIRE_WEAR_MODEL["emission_params"] = _e

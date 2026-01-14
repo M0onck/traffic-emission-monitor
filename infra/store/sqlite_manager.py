@@ -42,7 +42,8 @@ class DatabaseManager:
                 accel REAL,
                 vsp REAL,
                 op_mode INTEGER,
-                emission_rate REAL,
+                brake_emission REAL,
+                tire_emission REAL,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -61,7 +62,8 @@ class DatabaseManager:
                 duration_sec REAL,
                 avg_speed REAL,
                 max_speed REAL,
-                total_emission_mg REAL,
+                total_brake_mg REAL,
+                total_tire_mg REAL,
                 op_mode_stats JSON,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
@@ -82,7 +84,8 @@ class DatabaseManager:
             float(round(data['accel'], 2)),
             float(round(data['vsp'], 2)),
             int(data['op_mode']),
-            float(round(data['emission_rate'], 4))
+            float(round(data['brake_emission'], 4)),
+            float(round(data['tire_emission'], 4))
         )
         self.micro_buffer.append(row)
         
@@ -98,8 +101,8 @@ class DatabaseManager:
             self.cursor.executemany("""
                 INSERT INTO micro_logs (
                     frame_id, track_id, vehicle_type, plate_color, 
-                    speed, accel, vsp, op_mode, emission_rate
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    speed, accel, vsp, op_mode, brake_emission, tire_emission
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, self.micro_buffer)
             self.conn.commit()
             self.micro_buffer.clear()
@@ -131,8 +134,8 @@ class DatabaseManager:
                 INSERT OR REPLACE INTO macro_summary (
                     track_id, vehicle_type, plate_text, 
                     first_frame, last_frame, duration_sec, 
-                    avg_speed, max_speed, total_emission_mg, op_mode_stats
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    avg_speed, max_speed, total_brake_mg, total_tire_mg, op_mode_stats
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 int(tid),
                 str(final_type),
@@ -142,7 +145,8 @@ class DatabaseManager:
                 float(round(duration_sec, 2)),
                 float(round(avg_speed, 2)), 
                 float(round(max_speed, 2)), 
-                float(round(record.get('total_emission_mg', 0), 2)),
+                float(round(record.get('total_brake_mg', 0), 2)),
+                float(round(record.get('total_tire_mg', 0), 2)),
                 op_stats_json
             ))
             self.conn.commit()

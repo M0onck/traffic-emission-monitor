@@ -55,6 +55,41 @@
       "0": 26.50, "1": 0.00, "11": 0.35, "21": 1.20, "33": 1.80
     }
   },
+  "tire_wear_model": {
+    "base_ef": {
+      "car": 8.7,
+      "bus": 21.0,
+      "truck": 25.0,
+      "default": 10.0
+    },
+    "ref_mass": {
+      "car": 1600.0,
+      "bus": 13000.0,
+      "truck": 24000.0
+    },
+    "physics": {
+      "car": {
+        "stiffness_N": 2.0e5,
+        "specific_wear_rate": 2.5e-10,
+        "rubber_density": 1200.0
+      },
+      "bus": {
+        "stiffness_N": 1.6e6,
+        "specific_wear_rate": 2.0e-10,
+        "rubber_density": 1200.0
+      },
+      "truck": {
+        "stiffness_N": 3.0e6,
+        "specific_wear_rate": 1.8e-10,
+        "rubber_density": 1200.0
+      },
+      "default": {
+        "stiffness_N": 2.0e5,
+        "specific_wear_rate": 2.5e-10,
+        "rubber_density": 1200.0
+      }
+    }
+  },
   "type_map": {
     "car,Blue": "Car-gasoline",
     "bus,Blue": "Bus-gasoline",

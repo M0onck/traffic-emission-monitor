@@ -13,12 +13,6 @@ class TrafficMonitorEngine:
         """
         :param config: 全局配置对象 (settings module)
         :param components: 包含已初始化的组件字典
-               {
-                 'model': YOLO, 'tracker': ByteTrack, 'registry': VehicleRegistry,
-                 'db': DatabaseManager, 'visualizer': Visualizer,
-                 'kinematics': KinematicsEstimator (opt), 'brake_model': BrakeEmissionModel (opt),
-                 'ocr_worker': AsyncOCRManager (opt), 'transformer': ViewTransformer
-               }
         """
         self.cfg = config
         self.comps = components
@@ -92,12 +86,79 @@ class TrafficMonitorEngine:
             kinematics_data = self.comps['kinematics'].update(detections, transformed, frame.shape)
 
         # --- 5. 排放计算 (Emission) ---
+        brake_data = {}
+        tire_data = {}
         emission_data = {}
-        if self.emission_req and self.motion_on and self.comps.get('brake_model'):
-            emission_data = self.comps['brake_model'].process(
-                kinematics_data, detections, self.plate_cache, self.classifier
-            )
-            self._save_micro_logs(frame_id, emission_data)
+        
+        if self.emission_req and self.motion_on and kinematics_data:
+            # [步骤 A] 统一计算 VSP
+            vsp_map = {} # {tid: vsp_value}
+            vsp_calc = self.comps.get('vsp_calculator')
+            
+            if vsp_calc:
+                for tid, k_data in kinematics_data.items():
+                    # 查找 class_id
+                    mask = detections.tracker_id == tid
+                    if not np.any(mask): continue
+                    class_id = int(detections.class_id[mask][0])
+                    
+                    # 统一计算
+                    vsp = vsp_calc.calculate(
+                        v_ms=k_data['speed'],
+                        a_ms2=k_data['accel'],
+                        class_id=class_id
+                    )
+                    vsp_map[tid] = vsp
+
+            # [步骤 B] 运行刹车模型 (传入 vsp_map)
+            if self.comps.get('brake_model'):
+                brake_data = self.comps['brake_model'].process(
+                    kinematics_data, detections, self.plate_cache, self.classifier, 
+                    vsp_map=vsp_map  # 注入统一的 VSP
+                )
+                emission_data = brake_data
+
+            # [步骤 C] 运行轮胎模型 (传入 vsp_map)
+            if self.comps.get('tire_model'):
+                for tid, k_data in kinematics_data.items():
+                    mask = detections.tracker_id == tid
+                    if not np.any(mask): continue
+                    
+                    class_id = int(detections.class_id[mask][0])
+                    
+                    # 1. 修复硬编码：使用 self.cfg (注入的配置对象)
+                    category = 'car'
+                    if class_id == self.cfg.YOLO_CLASS_BUS:     # 使用注入的常量
+                        category = 'bus'
+                    elif class_id == self.cfg.YOLO_CLASS_TRUCK: # 使用注入的常量
+                        category = 'truck'
+                    
+                    # 2. 准备 EV 参数
+                    # 尝试从 brake_data 获取详细车型
+                    type_str = "Unknown"
+                    if tid in brake_data:
+                        type_str = brake_data[tid].get('type_str', '')
+                    else:
+                        # 回退逻辑：手动解析
+                        color = self.plate_cache.get(tid, "Unknown")
+                        _, type_str = self.classifier.resolve_type(class_id, plate_color_override=color)
+
+                    # 3. 运行模型 (传入 EV 修正参数)
+                    t_res = self.comps['tire_model'].process(
+                        vehicle_type=category,
+                        speed_ms=k_data['speed'],
+                        accel_ms2=k_data['accel'],
+                        dt=1.0/self.cfg.FPS,
+                        mass_kg=None,  # 保持 None，由内部基准质量决定
+                        vsp_kW_t=vsp_map.get(tid, 0.0),
+                        # 新增参数：通过注入的配置传递 EV 因子
+                        is_electric=("electric" in type_str),
+                        mass_factor=self.cfg.MASS_FACTOR_EV 
+                    )
+                    tire_data[tid] = t_res
+
+            # [步骤 D] 保存日志
+            self._save_micro_logs(frame_id, brake_data, tire_data, kinematics_data)
 
         # --- 6. 数据打包与渲染 ---
         label_data_list = self._prepare_labels(detections, kinematics_data, emission_data)
@@ -148,18 +209,48 @@ class TrafficMonitorEngine:
                 self.plate_cache[tid] = color
                 if tid in self.plate_retry: del self.plate_retry[tid]
 
-    def _save_micro_logs(self, frame_id, emission_data):
-        """保存微观数据"""
-        for tid, d in emission_data.items():
-            self.registry.update_emission_stats(
-                tid,
-                d['op_mode'],
-                d['emission_rate'],
-                d['speed']
-            )
+    def _save_micro_logs(self, frame_id, brake_data, tire_data, kinematics_data):
+        """
+        保存微观数据
+        [修复] 增加了 kinematics_data 参数，用于在排放数据缺失时回退获取速度信息
+        """
+        # 获取所有涉及的 TID 集合
+        all_tids = set(brake_data.keys()) | set(tire_data.keys())
+        
+        for tid in all_tids:
+            b_info = brake_data.get(tid, {})
+            t_info = tire_data.get(tid, {})
+            
+            # 更新 Registry
+            # 1. 刹车
+            if b_info:
+                self.registry.update_emission_stats(
+                    tid, b_info['op_mode'], b_info['emission_rate'], b_info['speed']
+                )
+            # 2. 轮胎
+            if t_info:
+                self.registry.update_tire_stats(tid, t_info['pm10'])
+            
+            # 写入数据库 (合并数据)
             rec = self.registry.get_record(tid)
             if rec and (frame_id - rec['first_frame'] > 5):
-                self.db.insert_micro(frame_id, tid, d)
+                # [修复] 速度获取逻辑：优先从 brake_data 取，没有则从 kinematics_data 取，防止 KeyError
+                current_speed = b_info.get('speed', 0)
+                if current_speed == 0 and tid in kinematics_data:
+                    current_speed = kinematics_data[tid]['speed']
+
+                # 构造合并后的数据包
+                merged_data = {
+                    'type_str': b_info.get('type_str', 'Unknown'),
+                    'plate_color': b_info.get('plate_color', 'Unknown'),
+                    'speed': current_speed,
+                    'accel': b_info.get('accel', 0),
+                    'vsp': b_info.get('vsp', 0),
+                    'op_mode': b_info.get('op_mode', -1),
+                    'brake_emission': b_info.get('emission_rate', 0),
+                    'tire_emission': t_info.get('pm10', 0) 
+                }
+                self.db.insert_micro(frame_id, tid, merged_data)
 
     def _prepare_labels(self, detections, kinematics_data, emission_data):
         """构建 LabelData 对象列表"""

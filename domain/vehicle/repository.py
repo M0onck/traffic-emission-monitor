@@ -33,7 +33,8 @@ class VehicleRegistry:
                     'reported': False,
                     'plate_history': [],
                     'op_mode_stats': defaultdict(int),
-                    'total_emission_mg': 0.0,
+                    'brake_emission_mg': 0.0,
+                    'tire_emission_mg': 0.0,
                     'max_speed': 0.0,
                     'speed_sum': 0.0,
                     'speed_count': 0
@@ -56,13 +57,17 @@ class VehicleRegistry:
             # 使用 self.fps 计算单帧时间
             # emission_rate 单位是 mg/s，当前是 1 帧，时间为 1/FPS 秒
             emission_per_frame = emission_rate_mg_s * (1.0 / self.fps)
-            rec['total_emission_mg'] += emission_per_frame
+            rec['brake_emission_mg'] += emission_per_frame
 
             # 3. 更新速度统计
             if current_speed > rec['max_speed']:
                 rec['max_speed'] = current_speed
             rec['speed_sum'] += current_speed
             rec['speed_count'] += 1
+
+    def update_tire_stats(self, tid, pm10_mg):
+        if tid in self.records:
+            self.records[tid]['tire_emission_mg'] += pm10_mg
 
     def add_plate_history(self, tid, color, area, conf):
         """记录一次有效的车牌识别结果"""
