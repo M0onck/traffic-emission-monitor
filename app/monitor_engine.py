@@ -8,6 +8,10 @@ class TrafficMonitorEngine:
     """
     [应用层] 交通监测引擎
     封装主循环逻辑，协调各模块工作。
+    
+    [架构模式]
+    1. 在线阶段 (On-line): 仅记录运动学轨迹 (Trajectory)，不做最终排放结算。
+    2. 离场阶段 (On-Exit): 基于最终确定的车型 (Voted Class)，回放轨迹并计算排放，统一入库。
     """
     def __init__(self, config, components):
         """
@@ -71,7 +75,10 @@ class TrafficMonitorEngine:
             detections = self.smoother.update_with_detections(detections)
 
         # --- 2. 业务更新 (Registry) ---
+        # 更新车辆档案，计算加权投票，但此时不锁定车型
         self.registry.update(detections, frame_id, self.model)
+        
+        # 检查是否有车辆离场，触发结算
         self._handle_exits(frame_id)
         
         # --- 3. 异步 OCR ---
@@ -84,112 +91,57 @@ class TrafficMonitorEngine:
             points = detections.get_anchors_coordinates(anchor=sv.Position.BOTTOM_CENTER)
             transformed = self.comps['transformer'].transform_points(points)
             kinematics_data = self.comps['kinematics'].update(detections, transformed, frame.shape)
-
-        # --- 5. 排放计算 (Emission) ---
-        brake_data = {}
-        tire_data = {}
-        emission_data = {}
-        
-        if self.emission_req and self.motion_on and kinematics_data:
-            # [步骤 A] 统一计算 VSP
-            vsp_map = {} # {tid: vsp_value}
-            vsp_calc = self.comps.get('vsp_calculator')
             
+            # [核心逻辑] 实时记录运动轨迹，仅存储 (v, a)，不计算排放
+            for tid, k_data in kinematics_data.items():
+                self.registry.append_kinematics(tid, frame_id, k_data['speed'], k_data['accel'])
+
+        # --- 5. 排放计算 (仅用于 UI 展示) ---
+        emission_data = {}
+        if self.emission_req and self.motion_on and kinematics_data:
+            # A. 统一计算 VSP (基于瞬时车型，仅供显示)
+            vsp_map = {} 
+            vsp_calc = self.comps.get('vsp_calculator')
             if vsp_calc:
                 for tid, k_data in kinematics_data.items():
-                    # 查找 class_id
                     mask = detections.tracker_id == tid
                     if not np.any(mask): continue
-                    class_id = int(detections.class_id[mask][0])
-                    
-                    # 统一计算
-                    vsp = vsp_calc.calculate(
-                        v_ms=k_data['speed'],
-                        a_ms2=k_data['accel'],
-                        class_id=class_id
-                    )
+                    class_id = int(detections.class_id[mask][0]) 
+                    vsp = vsp_calc.calculate(k_data['speed'], k_data['accel'], class_id)
                     vsp_map[tid] = vsp
 
-            # [步骤 B] 运行刹车模型 (传入 vsp_map)
+            # B. 运行刹车模型 (UI用)
+            # 这里调用的是 BrakeModel.process (批处理接口)，它内部会复用 calculate_single_point
             if self.comps.get('brake_model'):
-                brake_data = self.comps['brake_model'].process(
-                    kinematics_data, detections, self.plate_cache, self.classifier, 
-                    vsp_map=vsp_map  # 注入统一的 VSP
+                emission_data = self.comps['brake_model'].process(
+                    kinematics_data, detections, self.plate_cache, self.classifier, vsp_map,
+                    dt=1.0/self.cfg.FPS
                 )
-                emission_data = brake_data
-
-            # [步骤 C] 运行轮胎模型 (传入 vsp_map)
-            if self.comps.get('tire_model'):
-                for tid, k_data in kinematics_data.items():
-                    mask = detections.tracker_id == tid
-                    if not np.any(mask): continue
-                    
-                    class_id = int(detections.class_id[mask][0])
-                    
-                    # 1. 修复硬编码：使用 self.cfg (注入的配置对象)
-                    category = 'car'
-                    if class_id == self.cfg.YOLO_CLASS_BUS:     # 使用注入的常量
-                        category = 'bus'
-                    elif class_id == self.cfg.YOLO_CLASS_TRUCK: # 使用注入的常量
-                        category = 'truck'
-                    
-                    # 2. 准备 EV 参数
-                    # 尝试从 brake_data 获取详细车型
-                    type_str = "Unknown"
-                    if tid in brake_data:
-                        type_str = brake_data[tid].get('type_str', '')
-                    else:
-                        # 回退逻辑：手动解析
-                        color = self.plate_cache.get(tid, "Unknown")
-                        _, type_str = self.classifier.resolve_type(class_id, plate_color_override=color)
-
-                    # 3. 运行模型 (传入 EV 修正参数)
-                    t_res = self.comps['tire_model'].process(
-                        vehicle_type=category,
-                        speed_ms=k_data['speed'],
-                        accel_ms2=k_data['accel'],
-                        dt=1.0/self.cfg.FPS,
-                        mass_kg=None,  # 保持 None，由内部基准质量决定
-                        vsp_kW_t=vsp_map.get(tid, 0.0),
-                        # 新增参数：通过注入的配置传递 EV 因子
-                        is_electric=("electric" in type_str),
-                        mass_factor=self.cfg.MASS_FACTOR_EV 
-                    )
-                    tire_data[tid] = t_res
-
-            # [步骤 D] 保存日志
-            self._save_micro_logs(frame_id, brake_data, tire_data, kinematics_data)
-        
-        # [调试] 实时监控异常排放峰值
-        if self.debug_mode:
-            for tid, t_res in tire_data.items():
-                # 设定一个敏感阈值，例如单帧轮胎排放 > 1.0 mg (这在物理上很大)
-                tire_val = t_res.get('pm10', 0)
-                if tire_val > 1.0: 
-                    dbg = t_res.get('debug_info', {})
-                    print(f"\n[WARN] High Tire Emission ID:{tid} | Val:{tire_val:.2f}mg")
-                    print(f"   -> Cause: Mass={dbg.get('mass_kg')}kg | Force={dbg.get('force_N')}N | Method={dbg.get('calc_method')}")
-                    print(f"   -> Input: V={dbg.get('speed_ms')}m/s | A={dbg.get('accel')}m/s²")
-
-            for tid, b_res in brake_data.items():
-                # 设定刹车阈值，例如单帧排放 > 0.5 mg (对应 rate > 15 mg/s)
-                brake_rate = b_res.get('emission_rate', 0)
-                # 转化为单帧质量: rate * dt
-                brake_val_mg = brake_rate * (1.0 / self.cfg.FPS)
-                
-                if brake_val_mg > 0.5:
-                    dbg = b_res.get('debug_info', {})
-                    print(f"\n[WARN] High Brake Emission ID:{tid} | Val:{brake_val_mg:.2f}mg (Rate: {brake_rate:.1f}mg/s)")
-                    print(f"   -> State: OpMode={dbg.get('op_mode')} | BaseEF={dbg.get('base_rate_mg_s')}")
-                    print(f"   -> Input: V={dbg.get('v_ms')} | A={dbg.get('a_ms2')} | VSP={dbg.get('vsp')}")
 
         # --- 6. 数据打包与渲染 ---
         label_data_list = self._prepare_labels(detections, kinematics_data, emission_data)
         return self.visualizer.render(frame, detections, label_data_list)
 
     def _handle_exits(self, frame_id):
-        """处理车辆离场"""
+        """
+        处理车辆离场
+        """
         for tid, record in self.registry.check_exits(frame_id):
+            
+            # 1. 确定最终车型 (使用加权投票结果)
+            final_plate, final_type_str = self.classifier.resolve_type(
+                record['class_id'], record.get('plate_history', [])
+            )
+            
+            # 2. 回放轨迹，计算并保存微观历史数据
+            if self.emission_req and 'trajectory' in record:
+                self._calculate_and_save_history(tid, record, final_type_str)
+
+            # 3. 写入宏观汇总 (Macro)
+            # record 中的统计值已经在第2步中被更新完毕
+            self.db.insert_macro(tid, record, final_type_str, final_plate)
+
+            # 4. 打印调试报告
             if self.debug_mode and self.comps.get('reporter'):
                 self.comps['reporter'].print_exit_report(
                     tid,
@@ -197,10 +149,89 @@ class TrafficMonitorEngine:
                     self.comps.get('kinematics'),
                     self.classifier
                 )
-            final_plate, final_type = self.classifier.resolve_type(
-                record['class_id'], plate_history=record.get('plate_history', [])
+
+    def _calculate_and_save_history(self, tid, record, final_type_str):
+        """
+        [核心逻辑] 离场结算
+        功能：基于最终确定的车型，回放轨迹，调用模型的 calculate_single_point 接口重新计算排放。
+        """
+        trajectory = record.get('trajectory', [])
+        if not trajectory:
+            return
+
+        # 获取组件引用
+        vsp_calc = self.comps.get('vsp_calculator')
+        brake_model = self.comps.get('brake_model')
+        tire_model = self.comps.get('tire_model')
+        
+        if not (vsp_calc and brake_model and tire_model):
+            return
+
+        # 准备参数
+        final_class_id = record['class_id']
+        is_electric = "electric" in final_type_str
+        
+        # 确定 MOVES 大类
+        category = 'CAR'
+        if final_class_id == self.cfg.YOLO_CLASS_BUS: category = 'BUS'
+        elif final_class_id == self.cfg.YOLO_CLASS_TRUCK: category = 'TRUCK'
+
+        # 计算 dt
+        dt = 1.0 / self.cfg.FPS
+
+        # 遍历轨迹进行回放计算
+        for point in trajectory:
+            v = point['speed']
+            a = point['accel']
+            fid = point['frame_id']
+            
+            # A. 重算 VSP
+            vsp = vsp_calc.calculate(v, a, final_class_id)
+            
+            # B. & C. 重算 OpMode 和 刹车排放
+            # [修改点] 调用新接口 calculate_single_point
+            brake_res = brake_model.calculate_single_point(
+                v_ms=v, 
+                a_ms2=a, 
+                vsp=vsp, 
+                vehicle_class_id=final_class_id, 
+                dt=dt,
+                type_str=final_type_str
             )
-            self.db.insert_macro(tid, record, final_type, final_plate)
+            
+            brake_emission = brake_res['emission_mass']
+            op_mode = brake_res['op_mode']
+            
+            # D. 重算 轮胎排放
+            tire_res = tire_model.process(
+                vehicle_type=category.lower(),
+                speed_ms=v, accel_ms2=a, dt=1.0/self.cfg.FPS,
+                vsp_kW_t=vsp,
+                is_electric=is_electric,
+                mass_factor=self.cfg.MASS_FACTOR_EV
+            )
+            tire_emission = tire_res['pm10']
+
+            # E. 更新 Registry 统计值 (用于 Macro 表)
+            self.registry.update_emission_stats(tid, op_mode, brake_emission, v)
+            self.registry.update_tire_stats(tid, tire_emission)
+
+            # F. 构造微观数据包并入库
+            data = {
+                'type_str': final_type_str,
+                'plate_color': "Resolved",
+                'speed': v, 
+                'accel': a, 
+                'vsp': vsp,
+                'op_mode': op_mode,
+                'brake_emission': brake_emission,
+                'tire_emission': tire_emission
+            }
+            # 显式传入历史帧号 fid
+            self.db.insert_micro(fid, tid, data)
+            
+        # 强制刷写一次 DB 缓冲区
+        self.db.flush_micro_buffer()
 
     def _handle_ocr(self, frame, frame_id, detections):
         """OCR 任务分发与结果回收"""
@@ -232,67 +263,21 @@ class TrafficMonitorEngine:
                 self.plate_cache[tid] = color
                 if tid in self.plate_retry: del self.plate_retry[tid]
 
-    def _save_micro_logs(self, frame_id, brake_data, tire_data, kinematics_data):
-        """
-        保存微观数据
-        [修复] 增加了 kinematics_data 参数，用于在排放数据缺失时回退获取速度信息
-        """
-        # 获取所有涉及的 TID 集合
-        all_tids = set(brake_data.keys()) | set(tire_data.keys())
-        
-        for tid in all_tids:
-            b_info = brake_data.get(tid, {})
-            t_info = tire_data.get(tid, {})
-            
-            # 更新 Registry
-            # 1. 刹车
-            if b_info:
-                self.registry.update_emission_stats(
-                    tid, b_info['op_mode'], b_info['emission_rate'], b_info['speed']
-                )
-            # 2. 轮胎
-            if t_info:
-                self.registry.update_tire_stats(tid, t_info['pm10'])
-            
-            # 写入数据库 (合并数据)
-            rec = self.registry.get_record(tid)
-            if rec and (frame_id - rec['first_frame'] > 5):
-                # [修复] 速度获取逻辑：优先从 brake_data 取，没有则从 kinematics_data 取，防止 KeyError
-                current_speed = b_info.get('speed', 0)
-                if current_speed == 0 and tid in kinematics_data:
-                    current_speed = kinematics_data[tid]['speed']
-
-                # 构造合并后的数据包
-                merged_data = {
-                    'type_str': b_info.get('type_str', 'Unknown'),
-                    'plate_color': b_info.get('plate_color', 'Unknown'),
-                    'speed': current_speed,
-                    'accel': b_info.get('accel', 0),
-                    'vsp': b_info.get('vsp', 0),
-                    'op_mode': b_info.get('op_mode', -1),
-                    'brake_emission': b_info.get('emission_rate', 0),
-                    'tire_emission': t_info.get('pm10', 0) 
-                }
-                self.db.insert_micro(frame_id, tid, merged_data)
-
     def _prepare_labels(self, detections, kinematics_data, emission_data):
-        """构建 LabelData 对象列表"""
+        """构建 LabelData 对象列表 (UI显示用)"""
         labels = []
         for tid, raw_class_id in zip(detections.tracker_id, detections.class_id):
             # 优先从 Registry 获取经过平滑投票的 class_id
-            # 这样屏幕上的车型显示会非常稳定，不会在 Car/Truck 之间闪烁
             record = self.registry.get_record(tid)
-            voted_class_id = int(raw_class_id) # 默认回退
+            voted_class_id = int(raw_class_id)
             if record:
                 voted_class_id = record['class_id']
 
             data = LabelData(track_id=tid, class_id=voted_class_id)
             
-            # 填充速度
             if tid in kinematics_data:
                 data.speed = kinematics_data[tid]['speed']
             
-            # 填充排放与类型
             if tid in emission_data:
                 d = emission_data[tid]
                 data.emission_info = d
@@ -300,10 +285,8 @@ class TrafficMonitorEngine:
                 if not self.ocr_on and "(Def)" not in data.display_type:
                     data.display_type += "(Def)"
             else:
-                # 回退类型推断
                 hist = self.registry.get_history(tid)
                 color = self.plate_cache.get(tid)
-                # 传入 voted_class_id 而不是 raw_class_id
                 _, data.display_type = self.classifier.resolve_type(
                     voted_class_id, plate_history=hist, plate_color_override=color
                 )

@@ -7,6 +7,11 @@ class DatabaseManager:
     """
     [基础层] SQLite 数据库管理器
     功能：负责微观数据的批量写入和宏观数据的汇总存储。
+    
+    [适配说明 - On-Exit Replay Architecture]
+    为配合“离场结算”模式，本管理器支持：
+    1. insert_micro: 接收历史 frame_id (非当前流式帧号)，支持乱序写入 (按车辆聚类)。
+    2. flush_micro_buffer: 支持外部显式调用，确保单车轨迹计算完成后立即落盘。
     """
     def __init__(self, db_path: str = "data/traffic_data.db", fps: float = 30.0):
         # 确保目录存在
@@ -31,6 +36,8 @@ class DatabaseManager:
         """初始化数据库表结构"""
         
         # 1. 微观表 (Microscopic): 记录每帧的瞬时状态
+        # 注意: 这里的 timestamp 默认为插入时间。在离场结算模式下，
+        # 它代表"结算时间"而非"物理发生时间"。物理时间请参考 frame_id。
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS micro_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,7 +54,7 @@ class DatabaseManager:
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # 创建索引加速查询
+        # 创建索引加速查询 (按帧号或车辆ID查询轨迹)
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_frame ON micro_logs (frame_id);")
         self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_track ON micro_logs (track_id);")
 
@@ -73,27 +80,38 @@ class DatabaseManager:
     def insert_micro(self, frame_id: int, tid: int, data: Dict[str, Any]):
         """
         添加一条微观记录到缓冲区
+        :param frame_id: 必须显式传入。在回放模式下，这是历史轨迹中的帧号。
+        :param tid: 车辆追踪ID
+        :param data: 包含物理计算结果的字典
         """
+        # [修改] 增加 get() 和 默认值处理，防止计算层偶发的 None 导致崩溃
         # 强制转换为原生类型，避免 numpy 类型导致的数据库错误
-        row = (
-            int(frame_id),
-            int(tid),
-            str(data['type_str']),
-            str(data['plate_color']),
-            float(round(data['speed'], 2)),
-            float(round(data['accel'], 2)),
-            float(round(data['vsp'], 2)),
-            int(data['op_mode']),
-            float(round(data['brake_emission'], 4)),
-            float(round(data['tire_emission'], 4))
-        )
-        self.micro_buffer.append(row)
-        
-        if len(self.micro_buffer) >= self.BATCH_SIZE:
-            self.flush_micro_buffer()
+        try:
+            row = (
+                int(frame_id),
+                int(tid),
+                str(data.get('type_str', 'Unknown')),
+                str(data.get('plate_color', 'Unknown')),
+                float(round(data.get('speed', 0.0), 2)),
+                float(round(data.get('accel', 0.0), 2)),
+                float(round(data.get('vsp', 0.0), 2)),
+                int(data.get('op_mode', -1)),
+                float(round(data.get('brake_emission', 0.0), 4)),
+                float(round(data.get('tire_emission', 0.0), 4))
+            )
+            self.micro_buffer.append(row)
+            
+            if len(self.micro_buffer) >= self.BATCH_SIZE:
+                self.flush_micro_buffer()
+                
+        except Exception as e:
+            print(f"[Database Warning] Failed to prepare micro log row: {e}")
 
     def flush_micro_buffer(self):
-        """强制写入微观数据缓冲区"""
+        """
+        强制写入微观数据缓冲区
+        [使用场景] 在 Engine 中完成一辆车的全轨迹计算后调用，确保数据即时落盘。
+        """
         if not self.micro_buffer:
             return
             
@@ -130,6 +148,7 @@ class DatabaseManager:
             stats_dict = {int(k): int(v) for k, v in record.get('op_mode_stats', {}).items()}
             op_stats_json = json.dumps(stats_dict)
             
+            # 这里的 total_brake_mg 等字段已在 Replay 过程中被累加更新
             self.cursor.execute("""
                 INSERT OR REPLACE INTO macro_summary (
                     track_id, vehicle_type, plate_text, 
@@ -145,8 +164,8 @@ class DatabaseManager:
                 float(round(duration_sec, 2)),
                 float(round(avg_speed, 2)), 
                 float(round(max_speed, 2)), 
-                float(round(record.get('total_brake_mg', 0), 2)),
-                float(round(record.get('total_tire_mg', 0), 2)),
+                float(round(record.get('brake_emission_mg', 0), 2)), # 注意：字段名需与 Registry 一致
+                float(round(record.get('tire_emission_mg', 0), 2)),
                 op_stats_json
             ))
             self.conn.commit()
