@@ -1,3 +1,4 @@
+import math
 from collections import defaultdict
 
 class Reporter:
@@ -39,7 +40,9 @@ class Reporter:
             total_weight = 0.0
             
             for entry in history:
-                w = entry['area'] # 权重 = 像素面积
+                conf = entry.get('conf', 1.0)
+                area = entry.get('area', 0.0)
+                w = conf * math.sqrt(area)
                 scores[entry['color']] += w
                 total_weight += w
                 

@@ -159,6 +159,29 @@ class TrafficMonitorEngine:
 
             # [步骤 D] 保存日志
             self._save_micro_logs(frame_id, brake_data, tire_data, kinematics_data)
+        
+        # [调试] 实时监控异常排放峰值
+        if self.debug_mode:
+            for tid, t_res in tire_data.items():
+                # 设定一个敏感阈值，例如单帧轮胎排放 > 1.0 mg (这在物理上很大)
+                tire_val = t_res.get('pm10', 0)
+                if tire_val > 1.0: 
+                    dbg = t_res.get('debug_info', {})
+                    print(f"\n[WARN] High Tire Emission ID:{tid} | Val:{tire_val:.2f}mg")
+                    print(f"   -> Cause: Mass={dbg.get('mass_kg')}kg | Force={dbg.get('force_N')}N | Method={dbg.get('calc_method')}")
+                    print(f"   -> Input: V={dbg.get('speed_ms')}m/s | A={dbg.get('accel')}m/s²")
+
+            for tid, b_res in brake_data.items():
+                # 设定刹车阈值，例如单帧排放 > 0.5 mg (对应 rate > 15 mg/s)
+                brake_rate = b_res.get('emission_rate', 0)
+                # 转化为单帧质量: rate * dt
+                brake_val_mg = brake_rate * (1.0 / self.cfg.FPS)
+                
+                if brake_val_mg > 0.5:
+                    dbg = b_res.get('debug_info', {})
+                    print(f"\n[WARN] High Brake Emission ID:{tid} | Val:{brake_val_mg:.2f}mg (Rate: {brake_rate:.1f}mg/s)")
+                    print(f"   -> State: OpMode={dbg.get('op_mode')} | BaseEF={dbg.get('base_rate_mg_s')}")
+                    print(f"   -> Input: V={dbg.get('v_ms')} | A={dbg.get('a_ms2')} | VSP={dbg.get('vsp')}")
 
         # --- 6. 数据打包与渲染 ---
         label_data_list = self._prepare_labels(detections, kinematics_data, emission_data)
@@ -255,8 +278,15 @@ class TrafficMonitorEngine:
     def _prepare_labels(self, detections, kinematics_data, emission_data):
         """构建 LabelData 对象列表"""
         labels = []
-        for tid, class_id in zip(detections.tracker_id, detections.class_id):
-            data = LabelData(track_id=tid, class_id=class_id)
+        for tid, raw_class_id in zip(detections.tracker_id, detections.class_id):
+            # 优先从 Registry 获取经过平滑投票的 class_id
+            # 这样屏幕上的车型显示会非常稳定，不会在 Car/Truck 之间闪烁
+            record = self.registry.get_record(tid)
+            voted_class_id = int(raw_class_id) # 默认回退
+            if record:
+                voted_class_id = record['class_id']
+
+            data = LabelData(track_id=tid, class_id=voted_class_id)
             
             # 填充速度
             if tid in kinematics_data:
@@ -273,8 +303,9 @@ class TrafficMonitorEngine:
                 # 回退类型推断
                 hist = self.registry.get_history(tid)
                 color = self.plate_cache.get(tid)
+                # 传入 voted_class_id 而不是 raw_class_id
                 _, data.display_type = self.classifier.resolve_type(
-                    class_id, plate_history=hist, plate_color_override=color
+                    voted_class_id, plate_history=hist, plate_color_override=color
                 )
             
             labels.append(data)

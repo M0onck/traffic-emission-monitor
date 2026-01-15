@@ -117,13 +117,26 @@ class BrakeEmissionModel:
             
             emission_rate = base_emission * final_factor
 
+            debug_info = {
+                "v_ms": round(v, 2),
+                "a_ms2": round(a, 2),
+                "vsp": round(vsp, 2),
+                "op_mode": op_mode,
+                "base_rate_mg_s": base_emission, # 查表得到的基准值
+                "is_ev": "electric" in type_str,
+                "ev_factor": round(final_factor, 2), # 最终乘数
+                "mass_penalty": self.mass_factor_ev if "electric" in type_str else 1.0,
+                "regen_factor": regen_factor if "electric" in type_str else 1.0
+            }
+
             results[tid] = {
                 **data,
                 "vsp": vsp,
                 "op_mode": op_mode,
                 "emission_rate": emission_rate,
                 "type_str": type_str,
-                "plate_color": plate_color
+                "plate_color": plate_color,
+                "debug_info": debug_info
             }
             
         return results

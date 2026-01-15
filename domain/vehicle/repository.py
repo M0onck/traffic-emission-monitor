@@ -1,4 +1,5 @@
 import numpy as np
+import math
 from collections import defaultdict
 
 class VehicleRegistry:
@@ -21,12 +22,28 @@ class VehicleRegistry:
         """
         根据当前帧检测结果更新车辆档案
         """
-        for tid, cid, conf in zip(detections.tracker_id, detections.class_id, detections.confidence):
+        # 解包 box (xyxy) 用于计算面积
+        for tid, cid, conf, box in zip(
+                detections.tracker_id, 
+                detections.class_id, 
+                detections.confidence,
+                detections.xyxy
+            ):
+            cid = int(cid)
+            conf = float(conf)
+            
+            # 计算权重: W = Conf * sqrt(Area)
+            width = box[2] - box[0]
+            height = box[3] - box[1]
+            area = width * height
+            weight = conf * math.sqrt(area)  # 使用开根号面积加权
+            
             if tid not in self.records:
                 # 新车注册
                 self.records[tid] = {
                     'class_id': cid, 
                     'class_name': model.names[cid],
+                    'class_votes': defaultdict(float), # 车型投票箱
                     'first_frame': frame_id,
                     'max_conf': float(conf),
                     'last_seen_frame': frame_id,
@@ -39,13 +56,23 @@ class VehicleRegistry:
                     'speed_sum': 0.0,
                     'speed_count': 0
                 }
-            else:
-                # 老车更新
-                self.records[tid]['last_seen_frame'] = frame_id
-                if conf > self.records[tid]['max_conf']:
-                    self.records[tid]['max_conf'] = float(conf)
-                    self.records[tid]['class_id'] = cid
-                    self.records[tid]['class_name'] = model.names[cid]
+            
+            # 老车更新
+            rec = self.records[tid]
+            rec['last_seen_frame'] = frame_id
+            
+            # 累加车型权重
+            rec['class_votes'][cid] += weight
+            
+            # 实时更新最优车型 (不再仅依赖 max_conf)
+            # 只有当累积权重超过当前记录的类别时才切换，这比单帧判定更稳
+            best_class = max(rec['class_votes'], key=rec['class_votes'].get)
+            rec['class_id'] = best_class
+            rec['class_name'] = model.names[best_class]
+
+            # 仍然保留 max_conf 记录用于参考
+            if conf > rec['max_conf']:
+                rec['max_conf'] = conf
 
     def update_emission_stats(self, tid, op_mode, emission_rate_mg_s, current_speed):
         if tid in self.records:

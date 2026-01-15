@@ -1,3 +1,4 @@
+import math
 from collections import defaultdict
 
 class VehicleClassifier:
@@ -28,10 +29,18 @@ class VehicleClassifier:
         if plate_color_override and plate_color_override != "Unknown":
             final_color = plate_color_override
         elif plate_history:
-            # 加权投票逻辑
+            # 加权投票逻辑： Conf * sqrt(Area)
             scores = defaultdict(float)
-            for e in plate_history: scores[e['color']] += e['area']
-            if scores: final_color = max(scores, key=scores.get)
+            for e in plate_history:
+                # 兼容旧代码，如果没有 conf 字段则默认为 1.0
+                conf = e.get('conf', 1.0)
+                area = e.get('area', 0.0)
+                
+                weight = conf * math.sqrt(area) # [核心修改]
+                scores[e['color']] += weight
+                
+            if scores: 
+                final_color = max(scores, key=scores.get)
             
         # 2. 查表匹配 (优先)
         key = (class_id, final_color)

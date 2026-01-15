@@ -226,6 +226,9 @@ class TireEmissionModel:
                 'mode': f"{op_desc} ({op_mode_id})",
                 'op_mode': op_mode_id,
                 'calc_method': calc_method,
+                'mass_kg': int(curr_m),           # 检查是否误用了重型车质量
+                'speed_ms': round(speed_ms, 2),   # 检查速度是否虚高
+                'accel': round(accel_ms2, 2),     # 检查加速度是否抖动
                 'base_mg': round(emission_base_mg, 4),
                 'shear_mg': round(emission_shear_mg, 4),
                 'force_N': int(shear_force_N),
