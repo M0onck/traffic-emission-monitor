@@ -59,10 +59,11 @@ class Reporter:
 
         # 5. 运动统计
         speed_info = "N/A (Motion Off)"
-        if kinematics_estimator and tid in kinematics_estimator.trackers:
-            hist = kinematics_estimator.trackers[tid]['speed_history']
-            if hist: 
-                speed_info = f"Max: {max(hist):.1f} m/s"
+        # 直接从 registry 的记录中读取最大速度
+        max_spd = record.get('max_speed', 0.0)
+        # 只有当最大速度有意义时才显示
+        if max_spd > 0.1:
+            speed_info = f"Max: {max_spd:.1f} m/s"
 
         # 6. 排放与工况统计
         op_stats = record.get('op_mode_stats', {})

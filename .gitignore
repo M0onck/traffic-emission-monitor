@@ -36,3 +36,4 @@ model/*.onnx
 # 4. 忽略其他可能的输出
 *.log
 output/
+tests/
