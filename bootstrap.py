@@ -7,6 +7,7 @@ from ultralytics import YOLO
 from app.monitor_engine import TrafficMonitorEngine
 from domain.vehicle.repository import VehicleRegistry
 from domain.physics.vsp_calculator import VSPCalculator
+from domain.physics.opmode_calculator import MovesOpModeCalculator # [新增导入]
 from domain.physics.brake_emission_model import BrakeEmissionModel
 from domain.physics.tire_emission_model import TireEmissionModel
 from domain.vehicle.classifier import VehicleClassifier
@@ -19,7 +20,6 @@ from perception.kinematics_estimator import KinematicsEstimator
 from ui.renderer import Visualizer
 from ui.calibration_window import CalibrationUI
 from ui.console_reporter import Reporter
-
 
 def main():
     # 1. 系统初始化
@@ -55,6 +55,10 @@ def main():
             "road_grade_percent": cfg.ROAD_GRADE_PERCENT
         }
 
+        # [新增] 实例化共享的 OpMode 计算器 (策略对象)
+        # 这确保了轮胎模型和可能的其他模型使用完全一致的工况判定逻辑
+        opmode_calculator = MovesOpModeCalculator(config=cfg._e)
+
         # 构建刹车磨损排放模型配置
         brake_emission_config = {
             "braking_decel_threshold": cfg.BRAKING_DECEL_THRESHOLD,
@@ -64,9 +68,9 @@ def main():
             "moves_brake_wear_rates": cfg.MOVES_BRAKE_WEAR_RATES
         }
 
-        # 构建轮胎磨损排放模型配置
+        # [修改] 构建轮胎磨损排放模型配置
         tire_emission_config = {
-            "tire_wear_model": cfg.TIRE_WEAR_MODEL,
+            "tire_wear_rates": cfg.TIRE_WEAR_RATES, # 使用新加载的费率表
             "emission_params": cfg._e
         }
         
@@ -74,11 +78,12 @@ def main():
         kinematics_config = {
             "fps": cfg.FPS,
             "kinematics": {
-                "speed_window": cfg.SPEED_WINDOW,
+                "speed_window": cfg.SPEED_WINDOW,  # 分离的窗口参数
                 "accel_window": cfg.ACCEL_WINDOW,
                 "border_margin": cfg.BORDER_MARGIN,
                 "min_tracking_frames": cfg.MIN_TRACKING_FRAMES,
                 "max_physical_accel": cfg.MAX_PHYSICAL_ACCEL,
+                "poly_order": cfg.KINEMATICS_POLY_ORDER
             }
         }
 
@@ -108,7 +113,12 @@ def main():
         if cfg.ENABLE_EMISSION and cfg.ENABLE_MOTION:
             components['vsp_calculator'] = VSPCalculator(config=vsp_config)
             components['brake_model'] = BrakeEmissionModel(config=brake_emission_config)
-            components['tire_model'] = TireEmissionModel(config=tire_emission_config)
+            
+            # [关键修改] 注入 tire_emission_config 和 opmode_calculator
+            components['tire_model'] = TireEmissionModel(
+                config=tire_emission_config,
+                opmode_calculator=opmode_calculator
+            )
             
         if cfg.ENABLE_OCR:
             print(f">>> [System] 启动 OCR 进程...", flush=True)
@@ -125,7 +135,6 @@ def main():
 
     except KeyboardInterrupt:
         print("\n[System] 用户中断，停止运行。", flush=True)
-        # 安全退出
         if 'engine' in locals(): engine.cleanup(0)
             
     except Exception as e:
@@ -133,12 +142,10 @@ def main():
         traceback.print_exc()
         print(f"\n[System] 发生严重错误: {e}", flush=True)
         
-        # 兜底清理：如果引擎还没初始化就报错了，需要手动关掉 OCR 进程
         if 'ocr_worker' in locals() and hasattr(ocr_worker, 'stop'):
             print(">>> [System] 正在强制关闭 OCR 进程...", flush=True)
             ocr_worker.stop()
         
-        # 如果引擎已经存在，尝试调用它的清理方法
         if 'engine' in locals(): 
             engine.cleanup(0)
 

@@ -56,38 +56,14 @@
     }
   },
   "tire_wear_model": {
-    "base_ef": {
-      "car": 4.6,
-      "bus": 12.4,
-      "truck": 12.4,
-      "default": 4.6
+    "CAR": {
+      "0":  0.60, "1":  0.00, "11": 0.05, "21": 0.15, "35": 0.40, "37": 1.20
     },
-    "ref_mass": {
-      "car": 1600.0,
-      "bus": 13000.0,
-      "truck": 24000.0
+    "BUS": {
+      "0":  2.00, "1":  0.00, "11": 0.20, "21": 0.60, "35": 1.50, "37": 4.50
     },
-    "physics": {
-      "car": {
-        "stiffness_N": 1.5e5,
-        "specific_wear_rate": 4.5e-11,
-        "rubber_density": 1200.0
-      },
-      "bus": {
-        "stiffness_N": 8.0e5,
-        "specific_wear_rate": 3.5e-11,
-        "rubber_density": 1150.0
-      },
-      "truck": {
-        "stiffness_N": 1.2e6,
-        "specific_wear_rate": 3.0e-11,
-        "rubber_density": 1150.0
-      },
-      "default": {
-        "stiffness_N": 1.5e5,
-        "specific_wear_rate": 4.5e-11,
-        "rubber_density": 1200.0
-      }
+    "TRUCK": {
+      "0":  2.50, "1":  0.00, "11": 0.25, "21": 0.80, "35": 1.80, "37": 5.50
     }
   },
   "type_map": {
