@@ -156,6 +156,17 @@ class TrafficMonitorEngine:
         功能：基于最终确定的车型，回放轨迹，调用模型的 calculate_single_point 接口重新计算排放。
         """
         trajectory = record.get('trajectory', [])
+
+        # 轨迹清洗 (Trajectory Cleaning)
+        # 理由：车辆进出画面边缘时检测框不稳定，导致物理计算出现巨大尖峰。
+        # 策略：丢弃前 5 帧 (入场不稳定期) 和后 5 帧 (离场截断期)
+        TRIM_SIZE = 5 
+        if len(trajectory) > (TRIM_SIZE * 2 + 5): # 确保剩余至少5帧有效数据
+            trajectory = trajectory[TRIM_SIZE : -TRIM_SIZE]
+        else:
+            # 如果轨迹太短，不够切，则不做处理或直接放弃
+            pass
+
         if not trajectory:
             return
 
