@@ -10,7 +10,8 @@ class VehicleRegistry:
     2. 实现基于多帧观测的车型投票机制，消除检测抖动。
     3. 存储车辆的运动轨迹 (Trajectory)，支持离场后的物理回放计算。
     """
-    def __init__(self, fps: int = 30, min_survival_frames: int = 15, exit_threshold: int = 30):
+    def __init__(self, fps: int = 30, min_survival_frames: int = 15, exit_threshold: int = 30,
+                 min_valid_pts: int = 15, min_moving_dist: float = 2.0):
         """
         :param fps: 系统帧率，用于计算时间步长
         :param min_survival_frames: 最小存活帧数，低于此值的轨迹被视为噪点，离场时不报告
@@ -21,6 +22,8 @@ class VehicleRegistry:
         self.fps = fps
         self.min_survival_frames = min_survival_frames
         self.exit_threshold = exit_threshold
+        self.min_valid_pts = min_valid_pts
+        self.min_moving_dist = min_moving_dist
 
     def update(self, detections, frame_id, model):
         """
@@ -48,10 +51,11 @@ class VehicleRegistry:
             if tid not in self.records:
                 # 新车注册
                 self.records[tid] = {
-                    'class_id': cid,            # 当前帧瞬时类别
+                    'class_id': cid,                   # 当前帧瞬时类别
                     'class_name': model.names[cid],
-                    'class_votes': defaultdict(float), # [新增] 车型投票箱 {class_id: accumulated_weight}
-                    'trajectory': [],           # [新增] 运动轨迹容器，存储 (frame_id, speed, accel)
+                    'class_votes': defaultdict(float), # 车型投票箱 {class_id: accumulated_weight}
+                    'trajectory': [],                  # 运动轨迹容器，存储 (frame_id, speed, accel)
+                    'valid_samples_count': 0,          # 有效轨迹样本计数器
                     'first_frame': frame_id,
                     'max_conf': float(conf),
                     'last_seen_frame': frame_id,
@@ -85,59 +89,52 @@ class VehicleRegistry:
             if conf > rec['max_conf']:
                 rec['max_conf'] = conf
 
-    def append_kinematics(self, tid, frame_id, speed, accel):
+    def append_kinematics(self, tid, frame_id, speed, accel, raw_x=None, raw_y=None):
         """
-        [新增] 记录单帧运动学数据 (不进行排放计算)
+        记录单帧运动学数据 (不进行排放计算)
         该方法由 Engine 在每帧调用，仅做数据采集，为离场时的 VSP 回放计算做准备。
         """
         if tid in self.records:
             rec = self.records[tid]
-            # 1. 存入轨迹列表
+            # 存入轨迹列表
             rec['trajectory'].append({
                 'frame_id': frame_id,
                 'speed': speed,
-                'accel': accel
+                'accel': accel,
+                'raw_x': raw_x,
+                'raw_y': raw_y
             })
+            # 累加有效样本计数
+            rec['valid_samples_count'] = rec.get('valid_samples_count', 0) + 1
+
+            # 累加行驶里程
+            # Distance = Speed * dt (dt = 1/FPS)
+            dt = 1.0 / self.fps
+            rec['total_distance_m'] = rec.get('total_distance_m', 0.0) + (speed * dt)
             
-            # 2. 实时更新速度统计 (用于UI显示或简略统计)
+            # 实时更新速度统计 (用于UI显示或简略统计)
             if speed > rec['max_speed']:
                 rec['max_speed'] = speed
             rec['speed_sum'] += speed
             rec['speed_count'] += 1
 
-    def update_emission_stats(self, tid, op_mode, emission_mass_mg, current_speed):
+    def accumulate_opmode(self, record, op_mode: int):
         """
-        [保留] 更新排放统计
-        注意：在新的架构下，此方法应在【车辆离场时】的 Replay 循环中被调用，
-        而不是在每帧实时调用。
+        累加工况统计 (OpMode Histogram)
         """
-        if tid in self.records:
-            rec = self.records[tid]
-            # 1. 累积时间 (帧数)
-            rec['op_mode_stats'][op_mode] += 1
-            
-            # 2. 累积排放量 (mg)
-            rec['brake_emission_mg'] += emission_mass_mg
+        record['op_mode_stats'][op_mode] += 1
 
-            # 3. 更新速度统计
-            # (注意：此逻辑其实在 append_kinematics 里也有一份，
-            # 但为了 Macro 表的完整性，这里保留无害，或者可以删去速度部分仅保留排放)
-            if current_speed > rec['max_speed']:
-                rec['max_speed'] = current_speed
-            rec['speed_sum'] += current_speed
-            rec['speed_count'] += 1
-
-            # 累加行驶里程 (v * dt)
-            # 假设该方法是在回放循环中逐帧调用的，dt = 1/fps
-            rec['total_distance_m'] += current_speed * (1.0 / self.fps)
-
-    def update_tire_stats(self, tid, pm10_mg):
+    def accumulate_brake_emission(self, record, mass_mg: float):
         """
-        [保留] 更新轮胎排放统计
-        同上，应在离场 Replay 时调用。
+        累加刹车排放量
         """
-        if tid in self.records:
-            self.records[tid]['tire_emission_mg'] += pm10_mg
+        record['brake_emission_mg'] += mass_mg
+
+    def accumulate_tire_emission(self, record, mass_mg: float):
+        """
+        累加轮胎排放量
+        """
+        record['tire_emission_mg'] += mass_mg
 
     def add_plate_history(self, tid, color, area, conf):
         """记录一次有效的车牌识别结果"""
@@ -151,27 +148,65 @@ class VehicleRegistry:
 
     def check_exits(self, frame_id):
         """
-        检查并返回刚离场的车辆列表
-        在此处使用 min_survival_frames 过滤噪点
-        :return: list of (tid, record)
+        检查并移除已离开画面的车辆，返回符合质量标准的有效车辆记录。
+        
+        筛选策略 (Data Quality Gate):
+        为了确保入库数据的物理有效性，采用以下“三级门控”筛选机制：
+        1. 时间门控 (Survival): 生命周期 > min_survival_frames (过滤瞬间闪烁的噪点)
+        2. 质量门控 (Quality): 有效运动学样本数 > min_valid_trajectory_points (过滤仅在ROI边缘短暂路过的车辆)
+        3. 空间门控 (Movement): 累计位移 > min_moving_distance_m (过滤路边静止车辆或背景误检)
+        
+        重要说明：
+        凡是判定为离场（超时未更新）的车辆，无论是否通过筛选，均会从内存(self.records)中彻底清除，
+        以防止长时间运行下的内存泄漏。但只有通过筛选的车辆会被返回给上层进行数据库写入。
+        
+        :param frame_id: 当前帧号
+        :return: List[Tuple(tid, record)] 有效的离场车辆列表
         """
-        exited_vehicles = []
+        # 1. 识别所有超时未更新的车辆 (判定为已离场)
+        # 注意：这里不能直接在遍历时删除字典元素，需先收集 ID
+        timed_out_ids = []
         for tid, record in self.records.items():
-            # 检查是否满足“消失太久”的离场条件
-            if not record['reported'] and (frame_id - record['last_seen_frame'] > self.exit_threshold):
-                # 无论是否是噪点，都标记为 reported，避免下次重复检查
-                record['reported'] = True
-                
-                # 计算车辆生命周期
-                life_span = record['last_seen_frame'] - record['first_frame']
-                
-                # 只有存活够久的车辆才会被返回给 Engine 进行数据库记录
-                if life_span >= self.min_survival_frames:
-                    exited_vehicles.append((tid, record))
-                # else:
-                #     噪点车辆被静默忽略
-                    
-        return exited_vehicles
+            if frame_id - record['last_seen_frame'] > self.exit_threshold:
+                timed_out_ids.append(tid)
+
+        valid_exits = []
+        
+        # 2. 逐一进行质量筛选并清理内存
+        for tid in timed_out_ids:
+            record = self.records[tid]
+            
+            # --- 门控 1: 存活时间 (原有逻辑) ---
+            # 过滤掉存在时间极短的误检
+            life_span = record['last_seen_frame'] - record['first_frame']
+            has_survival = life_span >= self.min_survival_frames
+            
+            # --- 门控 2: 数据质量 (新增) ---
+            # 需确保车辆在 ROI 内且滤波器已收敛的帧数足够多 (建议值: 15帧)
+            # 防止只在标定框边缘蹭了一下的车辆入库，这类车辆的平均速度计算极不准确
+            min_valid_pts = getattr(self, 'min_valid_trajectory_points', 15)
+            valid_samples = record.get('valid_samples_count', 0)
+            has_quality = valid_samples >= min_valid_pts
+            
+            # --- 门控 3: 移动距离 (新增) ---
+            # 过滤掉虽然一直被追踪但实际上没动过的目标 (如树影、停止的车辆)
+            # 建议阈值: 2.0米
+            min_dist = getattr(self, 'min_moving_distance_m', 2.0)
+            total_dist = record.get('total_distance_m', 0.0)
+            has_movement = total_dist >= min_dist
+            
+            # 综合判定：必须同时通过三个门控
+            if has_survival and has_quality and has_movement:
+                valid_exits.append((tid, record))
+            # 调试日志：如果被丢弃，且在调试模式下，打印原因 (可选)
+            # else:
+            #     print(f"[Discard] ID:{tid} Life:{life_span} ValidPts:{valid_samples} Dist:{total_dist:.1f}")
+
+            # 3. 内存清理 (Critical Fix)
+            # 无论车辆是否有效，一旦离场，必须从内存中删除，否则会造成内存泄漏
+            del self.records[tid]
+            
+        return valid_exits
 
     def get_history(self, tid):
         """获取车牌识别历史"""

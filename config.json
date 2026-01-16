@@ -78,5 +78,10 @@
     "truck,Green": "Truck-electric",
     "Default_Car": "LDV-gasoline",
     "Default_Heavy": "HDV-diesel"
+  },
+  "quality_control": {
+    "min_valid_trajectory_points": 15,
+    "min_survival_frames": 30,
+    "min_moving_distance_m": 2.0
   }
 }

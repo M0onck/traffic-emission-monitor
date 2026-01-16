@@ -56,6 +56,11 @@ LOW_SPEED_THRESHOLD = _e["low_speed_threshold"]
 MASS_FACTOR_EV = _e["mass_factor_ev"]
 ROAD_GRADE_PERCENT = _e["road_grade_percent"]
 
+# 质量控制参数
+_qc = _cfg.get("quality_control", {})
+MIN_VALID_POINTS = _qc.get("min_valid_trajectory_points", 15)
+MIN_MOVING_DIST = _qc.get("min_moving_distance_m", 2.0)
+
 # --- 2. 核心常量 ---
 _y = _cfg["yolo_classes"]
 YOLO_CLASS_CAR = _y["yolo_class_car"]

@@ -84,7 +84,13 @@ def main():
             'smoother': sv.DetectionsSmoother(length=3),
             'transformer': ViewTransformer(source_points, target_points),
             'visualizer': Visualizer(calibration_points=source_points, trace_length=cfg.FPS),
-            'registry': VehicleRegistry(cfg.FPS, cfg.MIN_SURVIVAL_FRAMES, cfg.EXIT_THRESHOLD),
+            'registry': VehicleRegistry(
+                fps=cfg.FPS,
+                min_survival_frames=cfg.MIN_SURVIVAL_FRAMES,
+                exit_threshold=cfg.EXIT_THRESHOLD,
+                min_valid_pts=cfg.MIN_VALID_POINTS,
+                min_moving_dist=cfg.MIN_MOVING_DIST
+            ),
             'db': DatabaseManager(cfg.DB_PATH, cfg.FPS),
             'classifier': VehicleClassifier(cfg.TYPE_MAP, classifier_config)
         }
