@@ -88,13 +88,26 @@ class TrafficMonitorEngine:
         # --- 4. 物理估算 (Kinematics) ---
         kinematics_data = {}
         if self.motion_on and self.comps.get('kinematics'):
+            # 获取底部中心点 (像素坐标)
             points = detections.get_anchors_coordinates(anchor=sv.Position.BOTTOM_CENTER)
+            
+            # 坐标变换
             transformed = self.comps['transformer'].transform_points(points)
+            
+            # 计算运动学数据 (速度/加速度) - 注意：这里仍然对所有目标计算，以维持滤波器的连续性
             kinematics_data = self.comps['kinematics'].update(detections, transformed, frame.shape)
             
-            # [核心逻辑] 实时记录运动轨迹，仅存储 (v, a)，不计算排放
+            # ROI 过滤逻辑
+            # 建立 TID -> 像素坐标 的映射，用于快速查找
+            tid_to_pixel = {tid: pt for tid, pt in zip(detections.tracker_id, points)}
+            transformer = self.comps['transformer']
+
             for tid, k_data in kinematics_data.items():
-                self.registry.append_kinematics(tid, frame_id, k_data['speed'], k_data['accel'])
+                raw_point = tid_to_pixel.get(tid)
+                
+                # 仅当车辆中心点位于标定区域内时，才记录数据
+                if raw_point is not None and transformer.is_in_roi(raw_point):
+                    self.registry.append_kinematics(tid, frame_id, k_data['speed'], k_data['accel'])
 
         # --- 5. 排放计算 (仅用于 UI 展示) ---
         emission_data = {}
