@@ -64,7 +64,8 @@ class VehicleRegistry:
                     'tire_emission_mg': 0.0,
                     'max_speed': 0.0,
                     'speed_sum': 0.0,
-                    'speed_count': 0
+                    'speed_count': 0,
+                    'total_distance_m': 0.0
                 }
             
             # 老车更新
@@ -125,6 +126,10 @@ class VehicleRegistry:
                 rec['max_speed'] = current_speed
             rec['speed_sum'] += current_speed
             rec['speed_count'] += 1
+
+            # 累加行驶里程 (v * dt)
+            # 假设该方法是在回放循环中逐帧调用的，dt = 1/fps
+            rec['total_distance_m'] += current_speed * (1.0 / self.fps)
 
     def update_tire_stats(self, tid, pm10_mg):
         """

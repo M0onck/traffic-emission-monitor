@@ -67,10 +67,13 @@ class DatabaseManager:
                 first_frame INTEGER,
                 last_frame INTEGER,
                 duration_sec REAL,
+                total_distance_m REAL,
                 avg_speed REAL,
                 max_speed REAL,
                 total_brake_mg REAL,
                 total_tire_mg REAL,
+                brake_mg_per_km REAL,
+                tire_mg_per_km REAL,
                 op_mode_stats JSON,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
@@ -116,6 +119,7 @@ class DatabaseManager:
             return
             
         try:
+            # SQL 插入语句
             self.cursor.executemany("""
                 INSERT INTO micro_logs (
                     frame_id, track_id, vehicle_type, plate_color, 
@@ -132,29 +136,41 @@ class DatabaseManager:
         车辆离场时，写入宏观统计数据
         """
         try:
-            # 计算统计量
             life_span_frames = record['last_seen_frame'] - record['first_frame']
             duration_sec = life_span_frames / self.fps
             
-            # 计算速度统计
+            # [新增] 获取里程与计算平均速度
+            dist_m = record.get('total_distance_m', 0.0)
+            
+            # 平均速度计算 (优先使用 distance / time，避免 sum/count 的精度累积误差)
+            # 防止除以零
+            avg_speed = (dist_m / duration_sec) if duration_sec > 0 else 0.0
             max_speed = record.get('max_speed', 0.0)
-            avg_speed = 0.0
-            count = record.get('speed_count', 0)
-            if count > 0:
-                avg_speed = record.get('speed_sum', 0.0) / count
 
-            # OpMode 统计转 JSON 字符串
-            # 确保 keys/values 都是原生类型
+            # [新增] 计算单位排放 (mg/km)
+            # distance (m) -> km: dist_m / 1000
+            dist_km = dist_m / 1000.0
+            
+            total_brake = record.get('brake_emission_mg', 0)
+            total_tire = record.get('tire_emission_mg', 0)
+            
+            # 避免极短距离导致的除以零 (例如 < 10米 算作无效样本)
+            brake_per_km = (total_brake / dist_km) if dist_km > 0.01 else 0.0
+            tire_per_km = (total_tire / dist_km) if dist_km > 0.01 else 0.0
+
             stats_dict = {int(k): int(v) for k, v in record.get('op_mode_stats', {}).items()}
             op_stats_json = json.dumps(stats_dict)
             
-            # 这里的 total_brake_mg 等字段已在 Replay 过程中被累加更新
+            # SQL 插入语句
             self.cursor.execute("""
                 INSERT OR REPLACE INTO macro_summary (
                     track_id, vehicle_type, plate_text, 
                     first_frame, last_frame, duration_sec, 
-                    avg_speed, max_speed, total_brake_mg, total_tire_mg, op_mode_stats
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    total_distance_m, avg_speed, max_speed, 
+                    total_brake_mg, total_tire_mg, 
+                    brake_mg_per_km, tire_mg_per_km,
+                    op_mode_stats
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 int(tid),
                 str(final_type),
@@ -162,10 +178,13 @@ class DatabaseManager:
                 int(record['first_frame']),
                 int(record['last_seen_frame']),
                 float(round(duration_sec, 2)),
+                float(round(dist_m, 2)),         # [新增]
                 float(round(avg_speed, 2)), 
                 float(round(max_speed, 2)), 
-                float(round(record.get('brake_emission_mg', 0), 2)), # 注意：字段名需与 Registry 一致
-                float(round(record.get('tire_emission_mg', 0), 2)),
+                float(round(total_brake, 2)), 
+                float(round(total_tire, 2)),
+                float(round(brake_per_km, 2)),   # [新增]
+                float(round(tire_per_km, 2)),    # [新增]
                 op_stats_json
             ))
             self.conn.commit()

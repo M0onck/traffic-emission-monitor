@@ -2,94 +2,92 @@ import math
 from collections import defaultdict
 
 class Reporter:
-    """
-    [表现层] 调试报告生成器
-    功能：负责格式化并打印车辆离场时的详细数据报告。
-    """
     def __init__(self, config: dict):
-        """
-        :param config: 包含 debug_mode, fps, min_survival_frames 的字典
-        """
         self.debug_mode = config.get('debug_mode', False)
         self.fps = config.get('fps', 30)
         self.min_survival_frames = config.get('min_survival_frames', 30)
 
     def print_exit_report(self, tid, record, kinematics_estimator, vehicle_classifier):
         """
-        打印离场车辆的详细分析报告
-        :param tid: 车辆追踪 ID
-        :param record: 车辆档案字典 (来自 VehicleRegistry)
-        :param kinematics_estimator: 用于获取运动历史 (可能为 None)
+        [输出] 车辆离场报告
+        包含：基本信息、OCR结果、物理统计(速度/里程)、工况分布、排放总量及强度。
         """
-        # 1. 检查配置开关
-        if not self.debug_mode:
-            return
+        if not self.debug_mode: return
 
-        # 2. 噪点过滤 (存活时间过短)
+        # 1. 存活时间过滤
         life_span = record.get('last_seen_frame', 0) - record.get('first_frame', 0)
-        if life_span < self.min_survival_frames:
-            return 
+        if life_span < self.min_survival_frames: return 
 
+        duration = life_span / self.fps
+
+        # 2. 车牌/车型投票解析
         history = record.get('plate_history', [])
         final_plate = "Unknown"
-        vote_info = "无识别记录"
+        vote_info = "No OCR"
         
-        # 3. 面积加权投票逻辑 (Area-Weighted Voting)
         if history:
             scores = defaultdict(float)
             total_weight = 0.0
-            
             for entry in history:
-                conf = entry.get('conf', 1.0)
-                area = entry.get('area', 0.0)
-                w = conf * math.sqrt(area)
+                # 权重 = 置信度 * 面积开根号 (防止大框主导)
+                w = entry.get('conf', 1.0) * math.sqrt(entry.get('area', 0.0))
                 scores[entry['color']] += w
                 total_weight += w
-                
             if scores:
                 winner = max(scores, key=scores.get)
-                # 计算胜出者的权重占比
-                confidence = scores[winner] / total_weight if total_weight > 0 else 0
+                conf = scores[winner] / total_weight if total_weight > 0 else 0
                 final_plate = winner
-                vote_info = f"得分 {int(scores[winner]/1000)}k (占比 {confidence:.1%})"
+                vote_info = f"Score {int(scores[winner])} ({conf:.1%})"
 
-        # 4. 最终归类逻辑 (Type Classification)
-        # 调用公共分类器
         final_plate, final_type = vehicle_classifier.resolve_type(
-            record.get('class_id'), 
-            plate_history=record.get('plate_history', [])
+            record.get('class_id'), record.get('plate_history', [])
         )
 
-        # 5. 运动统计
-        speed_info = "N/A (Motion Off)"
-        # 直接从 registry 的记录中读取最大速度
+        # 3. 物理统计 (速度 & 里程) [新增]
+        dist_m = record.get('total_distance_m', 0.0)
         max_spd = record.get('max_speed', 0.0)
-        # 只有当最大速度有意义时才显示
-        if max_spd > 0.1:
-            speed_info = f"Max: {max_spd:.1f} m/s"
-
-        # 6. 排放与工况统计
-        op_stats = record.get('op_mode_stats', {})
-        total_brake = record.get('brake_emission_mg', 0.0)
-        total_tire = record.get('tire_emission_mg', 0.0)
         
-        # 格式化 OpMode 时间 (帧数 -> 秒)
+        # 计算平均速度 (m/s -> km/h)
+        # 使用 总里程/总时间 计算，比瞬时速度求平均更准确
+        avg_spd = dist_m / duration if duration > 0 else 0
+        avg_spd_kmh = avg_spd * 3.6
+        
+        speed_info = f"Avg: {avg_spd_kmh:.1f} km/h | Max: {max_spd:.1f} m/s | Dist: {dist_m:.1f} m"
+
+        # 4. 工况分布 (OpModes)
+        op_stats = record.get('op_mode_stats', {})
         op_summary = []
         for mode in sorted(op_stats.keys()):
             seconds = op_stats[mode] / self.fps
             mode_name = {
-                0: "Braking", 1: "Idling", 11: "Coast", 
-                21: "Cruise(L)", 33: "Cruise(H)"
+                0: "Brake", 1: "Idle", 11: "Coast", 
+                21: "Cruise(L)", 33: "Cruise(H)",
+                35: "Accel(L)", 37: "Accel(H)"
             }.get(mode, str(mode))
-            op_summary.append(f"{mode_name}: {seconds:.1f}s")
+            op_summary.append(f"{mode_name}:{seconds:.1f}s")
         
-        op_str = " | ".join(op_summary) if op_summary else "无有效工况数据"
+        op_str = " | ".join(op_summary) if op_summary else "No Data"
+        
+        # 5. 排放统计 (总量 & 强度) [新增]
+        total_brake = record.get('brake_emission_mg', 0.0)
+        total_tire = record.get('tire_emission_mg', 0.0)
 
-        # 7. 执行打印
+        # 计算排放强度 (mg/km)
+        # 仅当行驶距离足够长 (>10m) 时计算，避免极短轨迹产生的除零或离群值
+        dist_km = dist_m / 1000.0
+        if dist_km > 0.01:
+            brake_intensity = total_brake / dist_km
+            tire_intensity = total_tire / dist_km
+            intensity_str = f"Intensity: Brake {brake_intensity:.1f} | Tire {tire_intensity:.1f} (mg/km)"
+        else:
+            intensity_str = "Intensity: N/A (Dist < 10m)"
+
+        # 6. 打印报告
         print("-" * 70)
-        print(f"[离场] ID: {tid} | 存活: {life_span/self.fps:.1f}s | 类型: {final_type}")
-        print(f"       车牌: {final_plate} [{vote_info}]")
-        print(f"       速度: {speed_info}")
-        print(f"       统计: {op_str}")
-        print(f"       排放: 刹车 {total_brake:.2f} mg | 轮胎 {total_tire:.2f} mg (PM10)")
+        print(f"[Exit] ID: {tid} | Life: {duration:.1f}s | Type: {final_type}")
+        print(f"       Plate: {final_plate} [{vote_info}]")
+        print(f"       Physics: {speed_info}")
+        print(f"       OpModes: {op_str}")
+        print(f"       Total:     Brake {total_brake:.2f} mg | Tire {total_tire:.2f} mg")
+        print(f"       {intensity_str}")
         print("-" * 70 + "\n")
