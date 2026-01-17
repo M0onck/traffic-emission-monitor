@@ -8,11 +8,13 @@ class TrafficMonitorEngine:
     """
     [应用层] 交通监测引擎
     封装主循环逻辑，协调各模块工作。
+    负责感知、业务更新、OCR、物理估算、排放计算以及数据可视化。
     """
     def __init__(self, config, components):
         self.cfg = config
         self.comps = components
         
+        # 核心组件引用
         self.model = components['model']
         self.tracker = components['tracker']
         self.registry = components['registry']
@@ -21,24 +23,33 @@ class TrafficMonitorEngine:
         self.db = components['db']
         self.classifier = components['classifier']
         
+        # 缓存与状态管理
         self.plate_cache = {}
         self.plate_retry = {}
         
+        # 功能开关
         self.debug_mode = config.DEBUG_MODE
         self.motion_on = config.ENABLE_MOTION
         self.ocr_on = config.ENABLE_OCR
         self.emission_req = config.ENABLE_EMISSION
 
     def run(self):
+        """
+        主运行循环：读取视频流，处理每一帧，并在结束后清理资源。
+        """
         video_info = sv.VideoInfo.from_video_path(self.cfg.VIDEO_PATH)
         print(f">>> [Engine] 开始处理视频: {self.cfg.VIDEO_PATH}")
         
         with sv.VideoSink(self.cfg.TARGET_VIDEO_PATH, video_info=video_info) as sink:
             for frame_idx, frame in enumerate(sv.get_video_frames_generator(self.cfg.VIDEO_PATH)):
                 frame_id = frame_idx + 1
+                
+                # --- 核心处理流水线 ---
                 annotated_frame = self.process_frame(frame, frame_id)
+                
                 sink.write_frame(annotated_frame)
                 
+                # 实时显示
                 display = resize_with_pad(annotated_frame, (1280, 720))
                 cv2.imshow("Traffic Monitor", display)
                 if cv2.waitKey(1) == ord('q'):
@@ -47,13 +58,20 @@ class TrafficMonitorEngine:
         self.cleanup(frame_id)
 
     def process_frame(self, frame, frame_id):
+        """
+        单帧处理逻辑
+        """
         img_h, img_w = frame.shape[:2]
         
         # --- 1. 感知 (Detection & Tracking) ---
         res = self.model(frame, conf=0.3, iou=0.5, agnostic_nms=True, verbose=False)[0]
         detections = sv.Detections.from_ultralytics(res)
+        
+        # 过滤非感兴趣类别
         detections = detections[np.isin(detections.class_id, self.cfg.YOLO_INTEREST_CLASSES)]
         detections = self.tracker.update_with_detections(detections)
+        
+        # (可选) 轨迹平滑器
         if self.smoother:
             detections = self.smoother.update_with_detections(detections)
 
@@ -68,8 +86,11 @@ class TrafficMonitorEngine:
         # --- 4. 物理估算 (Kinematics) ---
         kinematics_data = {}
         if self.motion_on and self.comps.get('kinematics'):
+            # 提取底部中心点并进行透视变换
             points = detections.get_anchors_coordinates(anchor=sv.Position.BOTTOM_CENTER)
             transformed = self.comps['transformer'].transform_points(points)
+            
+            # 更新卡尔曼滤波与速度估算
             kinematics_data = self.comps['kinematics'].update(detections, transformed, frame.shape)
             
             tid_to_pixel = {tid: pt for tid, pt in zip(detections.tracker_id, points)}
@@ -77,6 +98,7 @@ class TrafficMonitorEngine:
 
             for tid, k_data in kinematics_data.items():
                 raw_point = tid_to_pixel.get(tid)
+                # 仅记录 ROI 区域内的运动数据
                 if raw_point is not None and transformer.is_in_roi(raw_point):
                     self.registry.append_kinematics(
                         tid, 
@@ -84,10 +106,12 @@ class TrafficMonitorEngine:
                         k_data['speed'], 
                         k_data['accel'],
                         raw_x=k_data['curr_x'],
-                        raw_y=k_data['curr_y']
+                        raw_y=k_data['curr_y'],
+                        pixel_x=raw_point[0], # [新增] 传入像素坐标 X
+                        pixel_y=raw_point[1]  # [新增] 传入像素坐标 Y
                     )
 
-        # --- 5. 排放计算 (仅用于 UI 展示) ---
+        # --- 5. 排放计算 (仅用于 UI 实时展示，非最终入库数据) ---
         emission_data = {}
         if self.emission_req and self.motion_on and kinematics_data:
             vsp_map = {} 
@@ -111,56 +135,64 @@ class TrafficMonitorEngine:
         return self.visualizer.render(frame, detections, label_data_list)
 
     def _handle_exits(self, frame_id):
+        """
+        处理离场车辆：结算数据、生成报表、存入数据库。
+        """
         for tid, record in self.registry.check_exits(frame_id):
+            # 解析最终车型和车牌
             final_plate, final_type_str = self.classifier.resolve_type(
                 record['class_id'], record.get('plate_history', [])
             )
             
+            # [新增] 使用几何连线法重算总里程 (覆盖原有的速度积分距离)
+            self._recalculate_distance_geometric(record)
+
+            # 如果启用排放计算，执行离场微观结算
             if self.emission_req and 'trajectory' in record:
                 self._calculate_and_save_history(tid, record, final_type_str)
 
+            # 存入宏观汇总表
             self.db.insert_macro(tid, record, final_type_str, final_plate)
 
+            # 控制台输出报告
             if self.debug_mode and self.comps.get('reporter'):
                 self.comps['reporter'].print_exit_report(
                     tid, record, self.comps.get('kinematics'), self.classifier
                 )
-
-    def _clean_opmode_sequence(self, opmodes):
+    
+    def _recalculate_distance_geometric(self, record):
         """
-        [数据清洗] OpMode 序列优化器 (简易状态机)
-        功能：基于物理约束清洗工况序列，消除不合理的突变。
+        [算法优化] 几何距离重算
+        使用原始记录的像素轨迹点 -> 透视变换 -> 累加欧氏距离。
+        相比速度积分法 (Speed * dt)，该方法不受滤波滞后影响，更接近真实物理轨迹长度。
         """
-        if not opmodes: return []
-        
-        cleaned = np.array(opmodes, dtype=int)
-        n = len(cleaned)
-        
-        # --- 策略 1: 消除短时毛刺 (Min Duration Filter) ---
-        # 如果中间某帧的状态与前后都不一样，且前后状态一致，则认为是噪声
-        # 例: [21, 21, 35, 21, 21] -> [21, 21, 21, 21, 21]
-        for i in range(1, n - 1):
-            prev, curr, next_ = cleaned[i-1], cleaned[i], cleaned[i+1]
-            if prev == next_ and curr != prev:
-                cleaned[i] = prev
+        trajectory = record.get('trajectory', [])
+        if len(trajectory) < 2: return
 
-        # --- 策略 2: 强制过渡约束 (State Transition Logic) ---
-        # 物理事实: 刹车(0) 不能瞬间变为 急加速(37)，必须经过 缓加速(35) 或 怠速(1)
-        for i in range(1, n):
-            prev, curr = cleaned[i-1], cleaned[i]
-            
-            # 规则: 刹车 -> 急加速 => 降级为 缓加速
-            if prev == 0 and curr == 37:
-                cleaned[i] = 35 
-            
-            # 规则: 急加速 -> 刹车 => 插入过渡 (这里不做插入，而是降级当前帧，由下一帧修正)
-            # 实际上由于我们有15帧的平滑，这种情况极少发生。
-            
-        return cleaned.tolist()
+        # 1. 提取有效的像素坐标
+        pixels = []
+        for p in trajectory:
+            if p.get('pixel_x') is not None and p.get('pixel_y') is not None:
+                pixels.append([p['pixel_x'], p['pixel_y']])
+        
+        if len(pixels) < 2: return
+        
+        # 2. 批量透视变换 (Pixel -> Meter)
+        # transform_points 需要 numpy 数组 (N, 2)
+        pts_phys = self.comps['transformer'].transform_points(np.array(pixels))
+        
+        # 3. 累加线段长度
+        # dist = sum( norm(p[i] - p[i-1]) )
+        diffs = pts_phys[1:] - pts_phys[:-1]
+        dists = np.linalg.norm(diffs, axis=1)
+        total_dist = float(np.sum(dists))
+        
+        # 4. 更新记录 (DatabaseManager 会基于这个新距离重算 avg_speed)
+        record['total_distance_m'] = total_dist
 
     def _calculate_and_save_history(self, tid, record, final_type_str):
         """
-        [核心逻辑] 离场结算 (完整修改版 v3.2)
+        [核心逻辑] 离场结算 (v3.2 完整版)
         流程：
         1. 轨迹头尾清洗 (Trimming)
         2. 全局轨迹重构 (Global Refinement): 平滑位置 -> 大跨度微分 -> 物理截断 -> 锚点插值
@@ -175,6 +207,9 @@ class TrafficMonitorEngine:
         TRIM_SIZE = 5 
         if len(trajectory) > (TRIM_SIZE * 2 + 5):
             trajectory = trajectory[TRIM_SIZE : -TRIM_SIZE]
+            # 将 Trim 后的列表回写给 record
+            # 这样 Console Reporter 拿到的就是去掉头尾噪声的干净数据了
+            record['trajectory'] = trajectory
         else:
             return # 轨迹太短，放弃计算
 
@@ -225,7 +260,6 @@ class TrafficMonitorEngine:
 
         # --- [Pass 2] OpMode 序列清洗 (Sequence Cleaning) ---
         # 引入状态机逻辑，消除不合理的工况跳变 (如 Brake <-> Hard Accel)
-        # 依赖外部实现的 _clean_opmode_sequence 方法
         clean_opmodes = self._clean_opmode_sequence(raw_opmodes)
 
         # --- [Pass 3] 排放结算与入库 (Final Settlement) ---
@@ -234,7 +268,7 @@ class TrafficMonitorEngine:
             v, a, vsp = data['v'], data['a'], data['vsp']
             
             # A. 刹车排放结算
-            # 1. 查基础排放率 (使用 protect method 查表)
+            # 1. 查基础排放率
             brake_base = brake_model._get_emission_factor(op_mode, category)
             
             # 2. 应用 EV 修正 (再生制动)
@@ -278,7 +312,7 @@ class TrafficMonitorEngine:
             # 显式传入历史帧号 fid，支持离场后的乱序写入
             self.db.insert_micro(data['fid'], tid, db_payload)
             
-        # 4. 强制刷写一次 DB 缓冲区，确保本车数据立即落盘
+        # 强制刷写一次 DB 缓冲区，确保本车数据立即落盘
         self.db.flush_micro_buffer()
 
     def _handle_ocr(self, frame, frame_id, detections):
@@ -288,17 +322,24 @@ class TrafficMonitorEngine:
         img_h, img_w = frame.shape[:2]
         if frame_id % self.cfg.OCR_INTERVAL == 0:
             for tid, box, cid in zip(detections.tracker_id, detections.xyxy, detections.class_id):
+                # 冷却时间检查
                 if frame_id - self.plate_retry.get(tid, -999) < self.cfg.OCR_RETRY_COOLDOWN:
                     continue
+                
+                # 坐标和尺寸检查
                 x1, y1, x2, y2 = map(int, box)
                 cx, cy = (x1+x2)/2, (y1+y2)/2
+                
+                # 仅对位于屏幕中心区域的车辆进行 OCR
                 if not (0.1*img_w < cx < 0.9*img_w and 0.4*img_h < cy < 0.98*img_h):
                     continue
+                
                 if (x2-x1)*(y2-y1) > self.cfg.MIN_PLATE_AREA:
                     crop = frame[max(0, y1):min(img_h, y2), max(0, x1):min(img_w, x2)].copy()
                     if worker.push_task(tid, crop, cid):
                         self.plate_retry[tid] = frame_id
 
+        # 获取并处理 OCR 结果
         for (tid, color, conf, area) in worker.get_results():
             self.registry.add_plate_history(tid, color, area, conf)
             if conf > self.cfg.OCR_CONF_THRESHOLD:
@@ -335,77 +376,88 @@ class TrafficMonitorEngine:
 
     def _refine_trajectory_global(self, trajectory, class_id):
         """
-        [离场重构] 全局轨迹优化器 v3.1
-        改进点：在 Step 4 密集计算阶段引入基于车型的物理约束 (Physical Constraint)，
-        将离谱值在插值前就进行截断。
+        [离场重构] 全局轨迹优化器 (v3.1)
+        利用完整的轨迹数据，执行以下操作：
+        1. 边缘填充平滑 (Padding)
+        2. 大跨度微分计算加速度 (Wide-span Diff)
+        3. 物理约束截断 (Physical Constraint)
+        4. 锚点插值 (Anchor Interpolation)
         """
         if len(trajectory) < 5: return trajectory
 
-        # --- [新增] 定义物理约束阈值 (m/s^2) ---
-        # 轿车极限较高，大车受限于功率重量比，极限较低
+        # --- 定义物理约束阈值 (m/s^2) ---
         ACCEL_LIMITS = {
-            self.cfg.YOLO_CLASS_CAR: 5.0,    # 轿车：急加速能力强
-            self.cfg.YOLO_CLASS_BUS: 2.5,    # 大巴：载人求稳，且自重大
-            self.cfg.YOLO_CLASS_TRUCK: 2.0   # 卡车：最笨重，极难超过 0.2g
+            self.cfg.YOLO_CLASS_CAR: 5.0,
+            self.cfg.YOLO_CLASS_BUS: 2.5,
+            self.cfg.YOLO_CLASS_TRUCK: 2.0
         }
-        # 默认为轿车标准 (5.0)
         phys_limit = ACCEL_LIMITS.get(class_id, 5.0)
 
-        # 1. 提取原始数据
         raw_x = np.array([p['raw_x'] for p in trajectory])
         raw_y = np.array([p['raw_y'] for p in trajectory])
         dt = 1.0 / self.cfg.FPS
         n_points = len(raw_x)
 
-        # 2. 定义带 Padding 的平滑函数
         def bidirectional_smooth(data, window=15):
             pad_width = window // 2
+            # 边缘填充 (mode='edge')，防止卷积在边缘处归零导致虚假位移
             padded = np.pad(data, (pad_width, pad_width), mode='edge')
             kernel = np.ones(window) / window
+            # 使用 'valid' 模式卷积，结果长度自动恢复为原始长度
             fwd = np.convolve(padded, kernel, mode='valid')
             padded_rev = np.pad(data[::-1], (pad_width, pad_width), mode='edge')
             bwd = np.convolve(padded_rev, kernel, mode='valid')[::-1]
             return (fwd + bwd) / 2.0
 
-        # 3. 计算平滑速度
+        # 1. 强力平滑位置
         smooth_x = bidirectional_smooth(raw_x, window=15)
         smooth_y = bidirectional_smooth(raw_y, window=15)
-        
+
+        # 2. 计算平滑速度
         grads_x = np.gradient(smooth_x, dt)
         grads_y = np.gradient(smooth_y, dt)
         refined_speed = np.sqrt(grads_x**2 + grads_y**2)
+        
+        # 二次平滑速度，消除差分噪声
         smooth_speed = bidirectional_smooth(refined_speed, window=15)
 
-        # 4. 计算“密集”加速度 (Dense Acceleration) 并应用物理约束
-        k = 7 # 半窗口
+        # 3. 计算加速度：使用大跨度微分 (Wide Span Difference)
+        k = 7  # 半窗口长度 (约 0.25s) -> 全窗口 0.5s
         dense_accel = np.zeros(n_points)
+        
         for i in range(n_points):
             idx_start = max(0, i - k)
             idx_end = min(n_points - 1, i + k)
+            
             dv = smooth_speed[idx_end] - smooth_speed[idx_start]
             dt_span = (idx_end - idx_start) * dt
             
             if dt_span > 1e-4:
                 raw_val = dv / dt_span
-                # [关键修改] 发现离谱值自动落回约束范围
-                # np.clip 会将 < -limit 的值变为 -limit，> limit 的值变为 limit
+                # [关键修改] 物理约束截断，防止离谱值污染后续插值
                 dense_accel[i] = np.clip(raw_val, -phys_limit, phys_limit)
             else:
                 dense_accel[i] = 0.0
 
-        # 5. 锚点重采样与插值
+        # 4. 锚点重采样与插值 (Anchor Resampling)
+        # 策略：每隔 15 帧取一个锚点，强制头尾锚点为 0
         anchor_step = 15
         anchor_indices = np.arange(0, n_points, anchor_step)
+        
+        # 确保包含最后一帧
         if anchor_indices[-1] != n_points - 1:
             anchor_indices = np.append(anchor_indices, n_points - 1)
             
         anchor_values = dense_accel[anchor_indices]
+        
+        # 强制边界约束：假定进出画面时为稳态
         anchor_values[0] = 0.0
         anchor_values[-1] = 0.0
         
+        # 线性插值生成最终平滑加速度曲线
         final_accel = np.interp(np.arange(n_points), anchor_indices, anchor_values)
 
-        # 6. 回写结果
+        # 5. 将重算结果回写到轨迹中
         for i, point in enumerate(trajectory):
             point['rt_speed'] = point['speed'] 
             point['rt_accel'] = point['accel']
@@ -414,11 +466,39 @@ class TrafficMonitorEngine:
 
         return trajectory
 
+    def _clean_opmode_sequence(self, opmodes):
+        """
+        [数据清洗] OpMode 序列优化器 (简易状态机)
+        功能：基于物理约束清洗工况序列，消除不合理的突变。
+        """
+        if not opmodes: return []
+        
+        cleaned = np.array(opmodes, dtype=int)
+        n = len(cleaned)
+        
+        # --- 策略 1: 消除短时毛刺 (Min Duration Filter) ---
+        # 如果中间某帧的状态与前后都不一样，且前后状态一致，则认为是噪声
+        for i in range(1, n - 1):
+            prev, curr, next_ = cleaned[i-1], cleaned[i], cleaned[i+1]
+            if prev == next_ and curr != prev:
+                cleaned[i] = prev
+
+        # --- 策略 2: 强制过渡约束 (State Transition Logic) ---
+        # 物理事实: 刹车(0) 不能瞬间变为 急加速(37)
+        for i in range(1, n):
+            prev, curr = cleaned[i-1], cleaned[i]
+            
+            # 规则: 刹车 -> 急加速 => 降级为 缓加速(35)
+            if prev == 0 and curr == 37:
+                cleaned[i] = 35 
+            
+        return cleaned.tolist()
+
     def cleanup(self, final_frame_id):
-            print("\n[Engine] 正在清理资源...")
-            if self.comps.get('ocr_worker'):
-                self.comps['ocr_worker'].stop()
-            cv2.destroyAllWindows()
-            print("[Engine] 保存剩余车辆数据...")
-            self._handle_exits(final_frame_id + 1000)
-            self.db.close()
+        print("\n[Engine] 正在清理资源...")
+        if self.comps.get('ocr_worker'):
+            self.comps['ocr_worker'].stop()
+        cv2.destroyAllWindows()
+        print("[Engine] 保存剩余车辆数据...")
+        self._handle_exits(final_frame_id + 1000)
+        self.db.close()

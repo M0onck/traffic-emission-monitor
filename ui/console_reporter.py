@@ -1,5 +1,6 @@
 import math
 from collections import defaultdict
+import plotext as plt
 
 class Reporter:
     def __init__(self, config: dict):
@@ -11,6 +12,7 @@ class Reporter:
         """
         [输出] 车辆离场报告
         包含：基本信息、OCR结果、物理统计(速度/里程)、工况分布、排放总量及强度。
+        [新增] 运动学曲线图 (速度 & 加速度)
         """
         if not self.debug_mode: return
 
@@ -43,12 +45,10 @@ class Reporter:
             record.get('class_id'), record.get('plate_history', [])
         )
 
-        # 3. 物理统计 (速度 & 里程) [新增]
+        # 3. 物理统计 (速度 & 里程)
         dist_m = record.get('total_distance_m', 0.0)
         max_spd = record.get('max_speed', 0.0)
         
-        # 计算平均速度 (m/s -> km/h)
-        # 使用 总里程/总时间 计算，比瞬时速度求平均更准确
         avg_spd = dist_m / duration if duration > 0 else 0
         avg_spd_kmh = avg_spd * 3.6
         
@@ -68,12 +68,10 @@ class Reporter:
         
         op_str = " | ".join(op_summary) if op_summary else "No Data"
         
-        # 5. 排放统计 (总量 & 强度) [新增]
+        # 5. 排放统计 (总量 & 强度)
         total_brake = record.get('brake_emission_mg', 0.0)
         total_tire = record.get('tire_emission_mg', 0.0)
 
-        # 计算排放强度 (mg/km)
-        # 仅当行驶距离足够长 (>10m) 时计算，避免极短轨迹产生的除零或离群值
         dist_km = dist_m / 1000.0
         if dist_km > 0.01:
             brake_intensity = total_brake / dist_km
@@ -82,7 +80,10 @@ class Reporter:
         else:
             intensity_str = "Intensity: N/A (Dist < 10m)"
 
-        # 6. 打印报告
+        # 6. [新增] 绘制运动学曲线 (速度 & 加速度)
+        trajectory = record.get('trajectory', [])
+        
+        # 打印报告头
         print("-" * 70)
         print(f"[Exit] ID: {tid} | Life: {duration:.1f}s | Type: {final_type}")
         print(f"       Plate: {final_plate} [{vote_info}]")
@@ -90,4 +91,50 @@ class Reporter:
         print(f"       OpModes: {op_str}")
         print(f"       Total:     Brake {total_brake:.2f} mg | Tire {total_tire:.2f} mg")
         print(f"       {intensity_str}")
+        
+        # 嵌入图表
+        if len(trajectory) > 5:
+            # 提取数据
+            speeds = [p['speed'] for p in trajectory]
+            accels = [p['accel'] for p in trajectory]
+            
+            print("\n       [Kinematics Profile]")
+            self._plot_kinematics_graph(speeds, accels)
+            
         print("-" * 70 + "\n")
+
+    def _plot_kinematics_graph(self, speeds, accels):
+        """
+        使用 plotext 绘制双子图：上方速度，下方加速度
+        """
+        # 1. 清除画布
+        plt.clear_figure()
+        
+        # 2. 准备时间轴
+        t = [i / self.fps for i in range(len(speeds))]
+        
+        # 3. 配置子图 (2行1列)
+        plt.subplots(2, 1)
+        
+        # --- 子图 1: 速度曲线 ---
+        plt.subplot(1, 1)
+        plt.plot(t, speeds, marker="dot", color="cyan")
+        plt.title("Speed (m/s)")
+        plt.theme('dark')
+        plt.grid(True, True)
+        # 隐藏 x 轴标签以减少拥挤 (共用下方的时间轴)
+        plt.ticks_style() 
+
+        # --- 子图 2: 加速度曲线 ---
+        plt.subplot(2, 1)
+        plt.plot(t, accels, marker="dot", color="magenta")
+        plt.title("Accel (m/s^2)")
+        plt.theme('dark')
+        plt.grid(True, True)
+        
+        # 4. 全局设置
+        # 宽度 70 字符，高度 20 行 (每个子图约占 10 行)
+        plt.plotsize(70, 20) 
+        
+        # 5. 显示
+        plt.show()
