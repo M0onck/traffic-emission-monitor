@@ -42,7 +42,7 @@ class MovesOpModeCalculator:
         
         # 2. 注入加速阈值 (用于扩展的趋势判定逻辑)
         # 默认值: 缓加速 0.1 m/s², 急加速 1.5 m/s²
-        self.accel_mild = config.get("accel_mild_threshold", 0.1)
+        self.accel_mild = config.get("accel_mild_threshold", 0.25)
         self.accel_hard = config.get("accel_hard_threshold", 1.5)
         
         # 3. 描述映射表 (用于调试输出)

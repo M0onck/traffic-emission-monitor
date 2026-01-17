@@ -35,6 +35,8 @@
     "braking_decel_threshold": -0.89,
     "idling_speed_threshold": 0.45,
     "low_speed_threshold": 11.17,
+    "accel_mild_threshold": 0.25,
+    "accel_hard_threshold": 1.50,
     "mass_factor_ev": 1.25,
     "road_grade_percent": 0.0
   },
