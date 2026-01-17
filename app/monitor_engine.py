@@ -3,6 +3,7 @@ import numpy as np
 import supervision as sv
 from collections import defaultdict
 from ui.renderer import resize_with_pad, LabelData
+from perception.camera import CameraPreprocessor
 
 class TrafficMonitorEngine:
     """
@@ -33,20 +34,46 @@ class TrafficMonitorEngine:
         self.ocr_on = config.ENABLE_OCR
         self.emission_req = config.ENABLE_EMISSION
 
+        # 初始化相机前处理器
+        self.camera_preprocessor = CameraPreprocessor(config)
+
     def run(self):
-        """
-        主运行循环：读取视频流，处理每一帧，并在结束后清理资源。
-        """
+        # 1. 获取原始视频信息
         video_info = sv.VideoInfo.from_video_path(self.cfg.VIDEO_PATH)
+        
+        # 2. 预读取逻辑：修正输出分辨率
+        # 必须先读取一帧并通过 CameraPreprocessor 处理，以获取裁剪后的实际尺寸。
+        if hasattr(self, 'camera_preprocessor'):
+            print(">>> [Engine] 正在计算去畸变后的输出尺寸...")
+            temp_cap = cv2.VideoCapture(self.cfg.VIDEO_PATH)
+            ret, temp_frame = temp_cap.read()
+            temp_cap.release()
+            
+            if ret:
+                # 预处理一帧，获取新尺寸
+                processed = self.camera_preprocessor.preprocess(temp_frame)
+                h, w = processed.shape[:2]
+                
+                # 检查尺寸是否发生变化
+                if w != video_info.width or h != video_info.height:
+                    print(f">>> [Engine] 分辨率已自适应调整: {video_info.width}x{video_info.height} -> {w}x{h}")
+                    # 更新 VideoInfo 以匹配新的帧尺寸
+                    video_info.width = w
+                    video_info.height = h
+            else:
+                print(">>> [Warn] 预读取失败，将使用原始分辨率（可能导致写入错误）。")
+
         print(f">>> [Engine] 开始处理视频: {self.cfg.VIDEO_PATH}")
         
+        # 3. 使用修正后的 video_info 初始化 Sink
         with sv.VideoSink(self.cfg.TARGET_VIDEO_PATH, video_info=video_info) as sink:
             for frame_idx, frame in enumerate(sv.get_video_frames_generator(self.cfg.VIDEO_PATH)):
                 frame_id = frame_idx + 1
                 
-                # --- 核心处理流水线 ---
+                # 核心处理流水线 (内部会调用 camera_preprocessor 改变尺寸)
                 annotated_frame = self.process_frame(frame, frame_id)
                 
+                # 此时 annotated_frame 的尺寸与 sink 的设定尺寸一致，写入成功
                 sink.write_frame(annotated_frame)
                 
                 # 实时显示
@@ -61,6 +88,11 @@ class TrafficMonitorEngine:
         """
         单帧处理逻辑
         """
+        # --- Step 0: 图像去畸变校准 ---
+        # 必须在这一步做，因为所有的后续逻辑 (YOLO坐标、ROI标定、测速) 
+        # 都必须基于"变直"后的几何空间。
+        frame = self.camera_preprocessor.preprocess(frame)
+
         img_h, img_w = frame.shape[:2]
         
         # --- 1. 感知 (Detection & Tracking) ---

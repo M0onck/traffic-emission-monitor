@@ -107,7 +107,7 @@ class Reporter:
         """
         使用 plotext 绘制双子图：上方速度，下方加速度
         """
-        # 1. 清除画布
+        # 1. 清除画布 (关键：防止多次调用叠加)
         plt.clear_figure()
         
         # 2. 准备时间轴
@@ -116,16 +116,15 @@ class Reporter:
         # 3. 配置子图 (2行1列)
         plt.subplots(2, 1)
         
-        # --- 子图 1: 速度曲线 ---
+        # --- 子图 1: 速度曲线 (Top) ---
         plt.subplot(1, 1)
         plt.plot(t, speeds, marker="dot", color="cyan")
         plt.title("Speed (m/s)")
         plt.theme('dark')
         plt.grid(True, True)
-        # 隐藏 x 轴标签以减少拥挤 (共用下方的时间轴)
         plt.ticks_style() 
 
-        # --- 子图 2: 加速度曲线 ---
+        # --- 子图 2: 加速度曲线 (Bottom) ---
         plt.subplot(2, 1)
         plt.plot(t, accels, marker="dot", color="magenta")
         plt.title("Accel (m/s^2)")
@@ -133,7 +132,6 @@ class Reporter:
         plt.grid(True, True)
         
         # 4. 全局设置
-        # 宽度 70 字符，高度 20 行 (每个子图约占 10 行)
         plt.plotsize(70, 20) 
         
         # 5. 显示
