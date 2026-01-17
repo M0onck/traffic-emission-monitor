@@ -408,16 +408,12 @@ class TrafficMonitorEngine:
 
     def _refine_trajectory_global(self, trajectory, class_id):
         """
-        [离场重构] 全局轨迹优化器 (v3.1)
-        利用完整的轨迹数据，执行以下操作：
-        1. 边缘填充平滑 (Padding)
-        2. 大跨度微分计算加速度 (Wide-span Diff)
-        3. 物理约束截断 (Physical Constraint)
-        4. 锚点插值 (Anchor Interpolation)
+        [离场重构] 全局轨迹优化器 (v3.3 边缘修正版)
+        修改：删除强制头尾加速度归零的逻辑，允许车辆在进出画面时保持加速/减速状态。
         """
         if len(trajectory) < 5: return trajectory
 
-        # --- 定义物理约束阈值 (m/s^2) ---
+        # --- 0. 准备物理参数 ---
         ACCEL_LIMITS = {
             self.cfg.YOLO_CLASS_CAR: 5.0,
             self.cfg.YOLO_CLASS_BUS: 2.5,
@@ -425,36 +421,39 @@ class TrafficMonitorEngine:
         }
         phys_limit = ACCEL_LIMITS.get(class_id, 5.0)
 
+        # 提取原始坐标序列
         raw_x = np.array([p['raw_x'] for p in trajectory])
         raw_y = np.array([p['raw_y'] for p in trajectory])
         dt = 1.0 / self.cfg.FPS
         n_points = len(raw_x)
 
+        # 定义内部辅助函数：双向边缘填充平滑
         def bidirectional_smooth(data, window=15):
             pad_width = window // 2
-            # 边缘填充 (mode='edge')，防止卷积在边缘处归零导致虚假位移
+            # mode='edge' 重复边缘值，防止卷积导致边缘数据归零
             padded = np.pad(data, (pad_width, pad_width), mode='edge')
             kernel = np.ones(window) / window
-            # 使用 'valid' 模式卷积，结果长度自动恢复为原始长度
+            # 卷积
             fwd = np.convolve(padded, kernel, mode='valid')
+            # 反向卷积消除相位滞后
             padded_rev = np.pad(data[::-1], (pad_width, pad_width), mode='edge')
             bwd = np.convolve(padded_rev, kernel, mode='valid')[::-1]
             return (fwd + bwd) / 2.0
 
-        # 1. 强力平滑位置
+        # --- 1. 位置平滑 (Position Smoothing) ---
         smooth_x = bidirectional_smooth(raw_x, window=15)
         smooth_y = bidirectional_smooth(raw_y, window=15)
 
-        # 2. 计算平滑速度
+        # --- 2. 速度计算 (Speed Calculation) ---
         grads_x = np.gradient(smooth_x, dt)
         grads_y = np.gradient(smooth_y, dt)
         refined_speed = np.sqrt(grads_x**2 + grads_y**2)
-        
-        # 二次平滑速度，消除差分噪声
+        # 再次平滑速度曲线，消除微分噪声
         smooth_speed = bidirectional_smooth(refined_speed, window=15)
 
-        # 3. 计算加速度：使用大跨度微分 (Wide Span Difference)
-        k = 7  # 半窗口长度 (约 0.25s) -> 全窗口 0.5s
+        # --- 3. 加速度计算 (Acceleration Calculation) ---
+        # 使用大跨度微分 (Wide Span Difference) 配合物理截断
+        k = 7  # 半窗口长度 (约 0.25s)
         dense_accel = np.zeros(n_points)
         
         for i in range(n_points):
@@ -466,13 +465,13 @@ class TrafficMonitorEngine:
             
             if dt_span > 1e-4:
                 raw_val = dv / dt_span
-                # [关键修改] 物理约束截断，防止离谱值污染后续插值
+                # 物理约束截断，防止边缘噪声过大
                 dense_accel[i] = np.clip(raw_val, -phys_limit, phys_limit)
             else:
                 dense_accel[i] = 0.0
 
-        # 4. 锚点重采样与插值 (Anchor Resampling)
-        # 策略：每隔 15 帧取一个锚点，强制头尾锚点为 0
+        # --- 4. 锚点插值 (Anchor Interpolation) ---
+        # 降采样平滑加速度曲线
         anchor_step = 15
         anchor_indices = np.arange(0, n_points, anchor_step)
         
@@ -482,17 +481,20 @@ class TrafficMonitorEngine:
             
         anchor_values = dense_accel[anchor_indices]
         
-        # 强制边界约束：假定进出画面时为稳态
-        anchor_values[0] = 0.0
-        anchor_values[-1] = 0.0
+        # [修改点] 已移除强制归零逻辑
+        # anchor_values[0] = 0.0
+        # anchor_values[-1] = 0.0
         
-        # 线性插值生成最终平滑加速度曲线
+        # 线性插值生成最终加速度
         final_accel = np.interp(np.arange(n_points), anchor_indices, anchor_values)
 
-        # 5. 将重算结果回写到轨迹中
+        # --- 5. 结果回写 (Write Back) ---
         for i, point in enumerate(trajectory):
+            # 保留旧值为 'rt_' (Real-time) 前缀
             point['rt_speed'] = point['speed'] 
             point['rt_accel'] = point['accel']
+            
+            # 写入优化后的值
             point['speed'] = float(smooth_speed[i])
             point['accel'] = float(final_accel[i])
 
