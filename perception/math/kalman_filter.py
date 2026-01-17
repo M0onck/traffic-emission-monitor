@@ -9,7 +9,7 @@ class KalmanFilterCV:
     观测向量 Measurement z: [pos_x, pos_y].T
     """
     def __init__(self, init_pos: np.ndarray, dt: float = 1/30.0, 
-                 process_noise_scale: float = 0.1, measurement_noise_scale: float = 10.0):
+                 process_noise_scale: float = 5.0, measurement_noise_scale: float = 1.0):
         """
         :param init_pos: 初始位置 [x, y]
         :param dt: 时间步长 (1/FPS)

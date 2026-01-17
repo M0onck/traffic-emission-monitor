@@ -12,7 +12,7 @@
     "enable_emission": true
   },
   "kinematics": {
-    "speed_window": 15,
+    "speed_window": 11,
     "accel_window": 15,
     "border_margin": 20,
     "min_tracking_frames": 10,

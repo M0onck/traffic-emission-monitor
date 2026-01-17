@@ -6,7 +6,7 @@ class AdaptiveSGEstimator:
     """
     [数学组件] 透视自适应 SG 滤波器
     """
-    def __init__(self, pos_window=15, speed_window=30, dt=0.033, poly_order=2):
+    def __init__(self, pos_window=7, speed_window=1, dt=0.033, poly_order=2):
         self.pos_window = pos_window
         self.speed_window = speed_window # 这里实际上被用作加速度计算窗口
         self.dt = dt
