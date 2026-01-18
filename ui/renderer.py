@@ -71,26 +71,65 @@ class Visualizer:
 
     def render(self, frame: np.ndarray, detections: sv.Detections, label_data_list: list) -> np.ndarray:
         """
-        绘制单帧画面
-        :param frame: 原始视频帧
-        :param detections: 目标检测结果 (Supervision Detections)
-        :param label_data_list: 对应每个检测目标的标签数据列表
-        :return: 绘制完成的图像
+        [修改版] 绘制单帧画面
+        特性：
+        1. 标签内容简化：直接构建包含 OpMode 的文本，不再依赖外部 formatter。
+        2. 视觉优化：隐藏实时速度，仅显示工况代码和状态 (如 Op:33 [Accel])。
         """
         scene = frame.copy()
         
-        # 1. 转换数据对象为字符串
-        labels = [self.formatter.format(d) for d in label_data_list]
+        # 1. 构造自定义标签文本 (替代原有的 formatter.format)
+        labels = []
+        for data in label_data_list:
+            # --- 第一行：ID 和 车型 ---
+            # 如果 display_type 为空，显示默认值 "Vehicle"
+            type_str = data.display_type if data.display_type else "Vehicle"
+            line1 = f"#{data.track_id} {type_str}"
+            
+            # --- 第二行：优先显示 OpMode ---
+            line2 = ""
+            if data.emission_info and 'op_mode' in data.emission_info:
+                op = data.emission_info['op_mode']
+                
+                # 简单的状态映射表，让数字代码更具可读性
+                state_str = "Run"
+                if op == 0: state_str = "Brake"      # 刹车/怠速
+                elif op == 1: state_str = "Idle"     # 怠速
+                elif op in [11, 21]: state_str = "Cruise" # 巡航
+                elif op >= 33: state_str = "Accel"   # 加速 (33,35,37...)
+                
+                line2 = f"Op:{op} [{state_str}]"
+                
+            elif data.speed is not None:
+                # 备用逻辑：如果没有算出工况但有速度（极少情况），显示速度
+                line2 = f"{data.speed:.1f} km/h"
+            else:
+                # 初始状态
+                line2 = "Detecting..."
 
-        # 2. 绘制基础图层
-        cv2.polylines(scene, [self.calibration_points], True, (255, 255, 0), 1)
-        cv2.putText(scene, "Analysis Zone", tuple(self.calibration_points[3]), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            # 合并两行文本
+            labels.append(f"{line1}\n{line2}")
 
-        # 3. 绘制车辆
-        scene = self.trace_annotator.annotate(scene=scene, detections=detections)
-        scene = self.box_annotator.annotate(scene=scene, detections=detections)
-        scene = self.label_annotator.annotate(scene=scene, detections=detections, labels=labels)
+        # 2. 绘制基础图层 (ROI 区域)
+        # 保持原有的标定框绘制逻辑
+        if self.calibration_points is not None and len(self.calibration_points) > 0:
+            cv2.polylines(scene, [self.calibration_points], True, (255, 255, 0), 1)
+            
+            # 确保索引不越界，原代码使用第4个点 (index 3) 作为文字锚点
+            text_anchor = tuple(self.calibration_points[3]) if len(self.calibration_points) > 3 else (50, 50)
+            cv2.putText(scene, "Analysis Zone", text_anchor, 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+
+        # 3. 绘制车辆注记 (利用 Supervision 库)
+        if self.trace_annotator:
+            scene = self.trace_annotator.annotate(scene=scene, detections=detections)
+        
+        if self.box_annotator:
+            scene = self.box_annotator.annotate(scene=scene, detections=detections)
+            
+        if self.label_annotator:
+            # 传入刚才构造好的新 labels 列表
+            scene = self.label_annotator.annotate(scene=scene, detections=detections, labels=labels)
         
         return scene
 

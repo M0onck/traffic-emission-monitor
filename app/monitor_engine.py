@@ -117,6 +117,8 @@ class TrafficMonitorEngine:
 
         # --- 4. 物理估算 (Kinematics) ---
         kinematics_data = {}
+        realtime_opmodes = {}
+
         if self.motion_on and self.comps.get('kinematics'):
             # 提取底部中心点并进行透视变换
             points = detections.get_anchors_coordinates(anchor=sv.Position.BOTTOM_CENTER)
@@ -132,6 +134,27 @@ class TrafficMonitorEngine:
                 frame.shape,
                 roi_y_range=roi_bounds
             )
+
+            # 实时计算 OpMode (仅用于 UI 显示)
+            # 这里的计算比较粗略，不带状态机清洗，仅做单帧判定
+            vsp_calc = self.comps.get('vsp_calculator')
+            brake_model = self.comps.get('brake_model')
+            opmode_calc = getattr(brake_model, 'opmode_calculator', None) if brake_model else None
+            
+            if vsp_calc and opmode_calc:
+                for tid, k_data in kinematics_data.items():
+                    # 找到对应的 class_id
+                    mask = detections.tracker_id == tid
+                    if not np.any(mask): continue
+                    class_id = int(detections.class_id[mask][0])
+                    
+                    v = k_data['speed']
+                    a = k_data['accel']
+                    
+                    # 计算 VSP 和 OpMode
+                    vsp = vsp_calc.calculate(v, a, class_id)
+                    op_mode = opmode_calc.get_opmode(v, a, vsp)
+                    realtime_opmodes[tid] = op_mode
             
             tid_to_pixel = {tid: pt for tid, pt in zip(detections.tracker_id, points)}
             transformer = self.comps['transformer']
@@ -171,7 +194,13 @@ class TrafficMonitorEngine:
                 )
 
         # --- 6. 数据打包与渲染 ---
-        label_data_list = self._prepare_labels(detections, kinematics_data, emission_data)
+        label_data_list = self._prepare_labels(
+            detections,
+            kinematics_data,
+            emission_data,
+            realtime_opmodes
+        )
+
         return self.visualizer.render(frame, detections, label_data_list)
 
     def _handle_exits(self, frame_id):
@@ -386,9 +415,18 @@ class TrafficMonitorEngine:
                 self.plate_cache[tid] = color
                 if tid in self.plate_retry: del self.plate_retry[tid]
 
-    def _prepare_labels(self, detections, kinematics_data, emission_data):
+    def _prepare_labels(self, detections, kinematics_data, emission_data, realtime_opmodes=None):
+        """
+        [UI 数据适配] 准备渲染所需的标签数据
+        
+        修改点 (v5.4):
+        1. 接收 realtime_opmodes 字典。
+        2. 隐藏实时速度 (data.speed = None)，改为显示工况 OpMode。
+        3. 构造临时的 emission_info 以便 renderer 能提取并显示 OpMode。
+        """
         labels = []
         for tid, raw_class_id in zip(detections.tracker_id, detections.class_id):
+            # 1. 获取车辆注册信息 (以获取修正后的 class_id)
             record = self.registry.get_record(tid)
             voted_class_id = int(raw_class_id)
             if record:
@@ -396,21 +434,42 @@ class TrafficMonitorEngine:
 
             data = LabelData(track_id=tid, class_id=voted_class_id)
             
-            if tid in kinematics_data:
+            # 2. 处理实时工况显示 (优先于速度显示)
+            if realtime_opmodes and tid in realtime_opmodes:
+                op = realtime_opmodes[tid]
+                
+                # [关键修改] 隐藏速度，防止 UI 数字跳动
+                data.speed = None 
+                
+                # 检查是否已有详细排放数据 (来自 brake_model 的完整计算)
+                if tid in emission_data:
+                    data.emission_info = emission_data[tid]
+                    # 确保 op_mode 被更新为最新实时值 (如果需要)
+                    data.emission_info['op_mode'] = op
+                else:
+                    # 如果没有详细排放数据，手动构造一个仅包含 op_mode 的字典
+                    # 这样 renderer.py 就能读取到并显示 "Op: XX"
+                    data.emission_info = {'op_mode': op}
+            
+            # 3. 回退逻辑：如果没算出工况，但有速度，则显示速度 (兼容旧逻辑)
+            elif tid in kinematics_data:
                 data.speed = kinematics_data[tid]['speed']
             
+            # 4. 处理车型显示文本
+            # 如果已有 emission_data，通常它包含了详细的车型描述 (type_str)
             if tid in emission_data:
                 d = emission_data[tid]
-                data.emission_info = d
-                data.display_type = d['type_str']
+                data.display_type = d.get('type_str', '')
                 if not self.ocr_on and "(Def)" not in data.display_type:
                     data.display_type += "(Def)"
             else:
+                # 如果没有排放数据，尝试从历史记录解析车型 (如 "Car-G" 或 "Bus-E")
                 hist = self.registry.get_history(tid)
                 color = self.plate_cache.get(tid)
                 _, data.display_type = self.classifier.resolve_type(
                     voted_class_id, plate_history=hist, plate_color_override=color
                 )
+            
             labels.append(data)
         return labels
 
