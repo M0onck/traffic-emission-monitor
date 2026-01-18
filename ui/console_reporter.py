@@ -1,4 +1,5 @@
 import math
+import numpy as np
 from collections import defaultdict
 import plotext as plt
 
@@ -105,33 +106,31 @@ class Reporter:
 
     def _plot_kinematics_graph(self, speeds, accels):
         """
-        [可视化优化版] 绘制运动学曲线
-        特性：
-        1. 速度轴：阶梯式纵坐标，白色线框。
-        2. 加速度轴：对称纵坐标(±N)，红线居中。
-        3. [修复] 强制使用奇数行高度，解决零线显示问题。
+        [可视化终极版 - 修复版] 绘制运动学曲线
+        修复点：
+        1. 解决了 yticks 传入整数导致的 TypeError 报错。
+        2. 手动计算 13 个均匀分布的刻度值，强制填满每一行。
         """
-        # 1. 获取终端尺寸并自适应
+        # 1. 获取终端尺寸
         term_w, term_h = plt.terminal_size()
         safe_w = min(term_w - 5, 100) 
+        safe_h = 31 
         
-        # [核心修改] 将高度固定为奇数 (21行)
-        # 原理：ASCII字符绘图中，只有奇数高度的画布才拥有物理上的"正中间那一行"。
-        # 偶数高度会导致 y=0 落在两行字符之间，导致红线渲染不清晰或消失。
-        safe_h = 21 
-        
-        # 窗口过小检查 (稍微调大需求，确保容纳21行)
-        if safe_w < 40 or term_h < 26:
+        # 窗口过小检查
+        if safe_w < 40 or term_h < 36:
             return 
 
-        # 2. 清除画布与配置
+        # 2. 清除画布
         plt.clear_figure()
         plt.plotsize(safe_w, safe_h)
         plt.subplots(2, 1)
         
-        # 准备时间轴
         t = [i / self.fps for i in range(len(speeds))]
         
+        # [核心参数] 刻度数量
+        # 总高31 -> 单图高约15 -> 除去标题/X轴，实际绘图区约12-13行
+        DENSE_TICKS_COUNT = 13
+
         # --- 子图 1: 速度曲线 (Top) ---
         plt.subplot(1, 1)
         plt.plot(t, speeds, marker="dot", color="cyan")
@@ -140,12 +139,15 @@ class Reporter:
         plt.ticks_color('white') 
         plt.grid(True, True)
         
-        # 速度纵坐标: 0 ~ N (步长 5)
+        # 计算量程
         max_v = max(speeds) if speeds else 0
-        if max_v > 0:
-            y_limit_v = math.ceil(max_v / 5.0) * 5.0
-            y_limit_v = max(y_limit_v, 5.0)
-            plt.ylim(0, y_limit_v)
+        limit_v = max(max_v * 1.05, 1.0) 
+        plt.ylim(0, limit_v)
+        
+        # [修复] 手动生成刻度列表
+        # linspace(start, stop, num) -> 生成包含 num 个点的等差数列
+        v_ticks = np.linspace(0, limit_v, DENSE_TICKS_COUNT).tolist()
+        plt.yticks(v_ticks) 
 
         # --- 子图 2: 加速度曲线 (Bottom) ---
         plt.subplot(2, 1)
@@ -155,12 +157,14 @@ class Reporter:
         plt.ticks_color('white')
         plt.grid(True, True)
         
-        # 加速度纵坐标: 对称模式 ±N (步长 2.0)
-        # 配合奇数行高，0 线将精确落在中间一行
+        # 计算量程
         max_abs_a = max([abs(x) for x in accels]) if accels else 0
-        a_limit = math.ceil(max_abs_a / 2.0) * 2.0
-        a_limit = max(a_limit, 2.0) 
-        plt.ylim(-a_limit, a_limit)
+        limit_a = max(max_abs_a * 1.05, 0.5) 
+        plt.ylim(-limit_a, limit_a)
+        
+        # [修复] 手动生成刻度列表
+        a_ticks = np.linspace(-limit_a, limit_a, DENSE_TICKS_COUNT).tolist()
+        plt.yticks(a_ticks)
         
         # 红色零线
         plt.hline(0, color="red") 

@@ -3,92 +3,87 @@ from collections import deque
 from perception.math.kalman_filter import KalmanFilterCV
 
 class AdaptiveSGEstimator:
-    """
-    [数学组件] 透视自适应 SG 滤波器
-    """
     def __init__(self, pos_window=11, speed_window=1, dt=0.033, poly_order=2):
         self.pos_window = pos_window
-        self.speed_window = speed_window # 这里实际上被用作加速度计算窗口
+        self.speed_window = speed_window 
         self.dt = dt
         self.poly_order = poly_order
-        
-        # 1. 位置历史
         self.x_history = deque(maxlen=pos_window)
         self.y_history = deque(maxlen=pos_window)
         self.t_axis_pos = np.arange(pos_window) * dt
-        
-        # 2. 速度历史
         self.speed_history = deque(maxlen=speed_window)
-        # t_axis_spd 不需要了，我们将直接计算斜率
-        
-        # 3. 状态记忆
         self.last_speed = 0.0
         self.last_accel = 0.0
-        
         self.lag_compensation = speed_window // 2
         self.speed_delay_queue = deque(maxlen=self.lag_compensation + 1)
 
     def _sg_derivative(self, y_data, t_axis):
-        """Savitzky-Golay 多项式拟合求导 (仅用于位置->速度)"""
         n = len(y_data)
         if n < self.poly_order + 1: return 0.0
-        
         t = t_axis[:n]
         coeffs = np.polyfit(t, y_data, self.poly_order)
         t_mid = t[n // 2]
-        
         if self.poly_order == 2:
             deriv = 2 * coeffs[0] * t_mid + coeffs[1]
         else:
             deriv = 3 * coeffs[0] * t_mid**2 + 2 * coeffs[1] * t_mid + coeffs[2]
-            
         return deriv
 
     def _calculate_confidence(self, y_norm):
-        if y_norm > 0.4: return 1.0
-        elif y_norm < 0.1: return 0.1 
-        else: return 0.1 + (y_norm - 0.1) / (0.4 - 0.1) * 0.9
+        """
+        [修改版] 计算测量置信度 (Cap Confidence Strategy)
+        策略：强制降低对视觉测量的信任上限，增强惯性。
+        """
+        TOP_EDGE = 0.15     
+        BOTTOM_EDGE = 0.85  
+        MIN_CONF = 0.1      
+        
+        # [核心修改] 设置最大置信度上限
+        # 0.3 意味着：最终速度 = 0.3 * 观测值 + 0.7 * 预测值
+        MAX_CONF = 0.3      
+        
+        if TOP_EDGE <= y_norm <= BOTTOM_EDGE:
+            # 中间区域返回设定的上限，而不是 1.0
+            return MAX_CONF
+        
+        elif y_norm < TOP_EDGE:
+            ratio = max(0.0, y_norm) / TOP_EDGE
+            return MIN_CONF + ratio * (MAX_CONF - MIN_CONF)
+            
+        else: 
+            dist_to_bottom = 1.0 - y_norm
+            range_len = 1.0 - BOTTOM_EDGE
+            ratio = max(0.0, dist_to_bottom) / range_len
+            return MIN_CONF + ratio * (MAX_CONF - MIN_CONF)
 
     def update(self, pos_x, pos_y, y_norm):
-        # --- Stage 1: 数据录入 ---
+        # ... (Stage 1 ~ 4 保持不变) ...
         self.x_history.append(pos_x)
         self.y_history.append(pos_y)
-        
-        if len(self.x_history) < self.pos_window:
-            return 0.0, 0.0
+        if len(self.x_history) < self.pos_window: return 0.0, 0.0
 
-        # --- Stage 2: 速度计算 (保持 SG 滤波以获得平滑速度) ---
         vx_meas = self._sg_derivative(list(self.x_history), self.t_axis_pos)
         vy_meas = self._sg_derivative(list(self.y_history), self.t_axis_pos)
         speed_meas = np.sqrt(vx_meas**2 + vy_meas**2)
-        
         self.speed_history.append(speed_meas)
         
-        # --- Stage 3: 加速度计算 (修改为长窗口线性斜率) ---
-        # 策略：不使用 SG 拟合曲线，而是直接计算过去 ~0.5s 的整体速度变化率
         accel_meas = 0.0
-        min_accel_window = 10 # 至少积累10帧才开始算加速度
-        
+        min_accel_window = 10
         if len(self.speed_history) >= min_accel_window:
-            # 取当前速度与 N 帧前的速度
             v_now = self.speed_history[-1]
-            v_old = self.speed_history[0] # 这里的 0 就是队列头部，即 window 帧之前
-            
-            # 计算时间跨度
+            v_old = self.speed_history[0]
             dt_span = (len(self.speed_history) - 1) * self.dt
-            
-            # 计算平均加速度 (Linear Slope)
             accel_meas = (v_now - v_old) / dt_span
 
-        # --- Stage 4: 惯性预测 ---
         speed_pred = self.last_speed + self.last_accel * self.dt
         accel_pred = self.last_accel
 
         # --- Stage 5: 动态融合 ---
         w = self._calculate_confidence(y_norm)
         
-        if abs(accel_meas - self.last_accel) > 2.0:
-            w *= 0.5
+        # [额外修改] 如果测量加速度剧烈跳变，进一步降低权重
+        if abs(accel_meas - self.last_accel) > 1.5:
+            w *= 0.2
 
         final_speed = w * speed_meas + (1 - w) * speed_pred
         final_accel = w * accel_meas + (1 - w) * accel_pred
@@ -112,8 +107,12 @@ class KinematicsEstimator:
         dt = 1.0 / self.fps
         
         params = config.get("kinematics", {})
-        self.speed_window = params.get("speed_window", 15)
-        self.accel_window = params.get("accel_window", 15)
+        
+        # [核心修改] 增大默认平滑窗口
+        # 将默认窗口从 15 提升到 31 (约 1秒)，大幅平滑高频抖动
+        self.speed_window = params.get("speed_window", 31)
+        self.accel_window = params.get("accel_window", 31)
+        
         self.border_margin = params.get("border_margin", 20)
         self.min_tracking_frames = params.get("min_tracking_frames", 10)
         self.max_physical_accel = params.get("max_physical_accel", 6.0)
@@ -124,10 +123,14 @@ class KinematicsEstimator:
         self.dt = dt
         self.last_raw_pixels = {} 
 
-    def update(self, detections, points_transformed, frame_shape):
+    def update(self, detections, points_transformed, frame_shape, roi_y_range=None):
+        # ... (update 逻辑保持不变) ...
         results = {}
         img_h, img_w = frame_shape[:2]
-        
+        roi_min_y, roi_max_y = 0.0, float(img_h)
+        if roi_y_range: roi_min_y, roi_max_y = roi_y_range
+        roi_height = max(1.0, roi_max_y - roi_min_y)
+
         raw_boxes = detections.xyxy
         if len(raw_boxes) > 0:
             raw_bottom_y = raw_boxes[:, 3] 
@@ -143,7 +146,7 @@ class KinematicsEstimator:
                     'kf': KalmanFilterCV(point, dt=self.dt),
                     'sg': AdaptiveSGEstimator(
                         pos_window=self.speed_window, 
-                        speed_window=self.accel_window, # 使用配置的加速度窗口长度
+                        speed_window=self.accel_window,
                         dt=self.dt,
                         poly_order=self.poly_order
                     )
@@ -152,7 +155,6 @@ class KinematicsEstimator:
                 self.last_raw_pixels[tid] = (raw_centers_x[i], raw_centers_y[i])
             
             self.active_frames[tid] += 1
-            
             curr_pixel = (raw_centers_x[i], raw_centers_y[i])
             prev_pixel = self.last_raw_pixels.get(tid, curr_pixel)
             pixel_dist = np.hypot(curr_pixel[0]-prev_pixel[0], curr_pixel[1]-prev_pixel[1])
@@ -164,7 +166,7 @@ class KinematicsEstimator:
             smooth_pos_x, smooth_pos_y = state[0], state[1]
             
             y_pixel = raw_bottom_y[i]
-            y_norm = y_pixel / img_h
+            y_norm = (y_pixel - roi_min_y) / roi_height
             
             sg = self.trackers[tid]['sg']
             speed, accel = sg.update(smooth_pos_x, smooth_pos_y, y_norm)
@@ -186,12 +188,8 @@ class KinematicsEstimator:
                 continue 
 
             accel = np.clip(accel, -self.max_physical_accel, self.max_physical_accel)
-
             results[tid] = {
-                "speed": speed, 
-                "accel": accel,
-                "curr_x": smooth_pos_x,
-                "curr_y": smooth_pos_y
+                "speed": speed, "accel": accel,
+                "curr_x": smooth_pos_x, "curr_y": smooth_pos_y
             }
-            
         return results

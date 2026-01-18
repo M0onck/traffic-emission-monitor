@@ -121,9 +121,17 @@ class TrafficMonitorEngine:
             # 提取底部中心点并进行透视变换
             points = detections.get_anchors_coordinates(anchor=sv.Position.BOTTOM_CENTER)
             transformed = self.comps['transformer'].transform_points(points)
+
+            # 获取 ROI 垂直范围
+            roi_bounds = self.comps['transformer'].get_roi_vertical_bounds()
             
             # 更新卡尔曼滤波与速度估算
-            kinematics_data = self.comps['kinematics'].update(detections, transformed, frame.shape)
+            kinematics_data = self.comps['kinematics'].update(
+                detections,
+                transformed,
+                frame.shape,
+                roi_y_range=roi_bounds
+            )
             
             tid_to_pixel = {tid: pt for tid, pt in zip(detections.tracker_id, points)}
             transformer = self.comps['transformer']
