@@ -408,95 +408,100 @@ class TrafficMonitorEngine:
 
     def _refine_trajectory_global(self, trajectory, class_id):
         """
-        [离场重构] 全局轨迹优化器 (v3.3 边缘修正版)
-        修改：删除强制头尾加速度归零的逻辑，允许车辆在进出画面时保持加速/减速状态。
+        [算法补丁] 全局轨迹优化器 v5.0 (高保真版)
+        修改点：
+        1. 移除 'Anchor Interpolation' (锚点插值)：彻底解决加速度与速度相位不匹配的问题。
+        2. 增强位置平滑：防止大车(Bus/Truck)因检测框抖动导致的速度虚高。
+        3. 采用宽窗微分：物理上更合理的加速度计算方式。
         """
         if len(trajectory) < 5: return trajectory
 
-        # --- 0. 准备物理参数 ---
+        # 1. 准备物理参数
         ACCEL_LIMITS = {
             self.cfg.YOLO_CLASS_CAR: 5.0,
             self.cfg.YOLO_CLASS_BUS: 2.5,
             self.cfg.YOLO_CLASS_TRUCK: 2.0
         }
         phys_limit = ACCEL_LIMITS.get(class_id, 5.0)
-
-        # 提取原始坐标序列
+        dt = 1.0 / self.cfg.FPS
+        
         raw_x = np.array([p['raw_x'] for p in trajectory])
         raw_y = np.array([p['raw_y'] for p in trajectory])
-        dt = 1.0 / self.cfg.FPS
         n_points = len(raw_x)
 
-        # 定义内部辅助函数：双向边缘填充平滑
-        def bidirectional_smooth(data, window=15):
+        # 内部平滑函数
+        def bidirectional_smooth(data, window):
+            if len(data) < window: window = len(data) if len(data) % 2 == 1 else len(data) - 1
+            if window < 3: return data
             pad_width = window // 2
-            # mode='edge' 重复边缘值，防止卷积导致边缘数据归零
             padded = np.pad(data, (pad_width, pad_width), mode='edge')
             kernel = np.ones(window) / window
-            # 卷积
             fwd = np.convolve(padded, kernel, mode='valid')
-            # 反向卷积消除相位滞后
             padded_rev = np.pad(data[::-1], (pad_width, pad_width), mode='edge')
             bwd = np.convolve(padded_rev, kernel, mode='valid')[::-1]
             return (fwd + bwd) / 2.0
 
-        # --- 1. 位置平滑 (Position Smoothing) ---
-        smooth_x = bidirectional_smooth(raw_x, window=15)
-        smooth_y = bidirectional_smooth(raw_y, window=15)
-
-        # --- 2. 速度计算 (Speed Calculation) ---
+        # 2. 位置平滑 (加强版)
+        # 大车(Bus)的检测框更容易抖动，需要更强的平滑来防止"虚假位移"
+        pos_window = 15 if class_id == self.cfg.YOLO_CLASS_CAR else 21 
+        smooth_x = bidirectional_smooth(raw_x, window=pos_window)
+        smooth_y = bidirectional_smooth(raw_y, window=pos_window)
+        
+        # 3. 速度计算 (基于平滑后的位置)
+        # 使用 np.gradient 计算微分，但再次平滑结果
         grads_x = np.gradient(smooth_x, dt)
         grads_y = np.gradient(smooth_y, dt)
-        refined_speed = np.sqrt(grads_x**2 + grads_y**2)
-        # 再次平滑速度曲线，消除微分噪声
-        smooth_speed = bidirectional_smooth(refined_speed, window=15)
+        inst_speed = np.sqrt(grads_x**2 + grads_y**2)
+        
+        # 速度平滑：消除微分带来的高频噪声
+        smooth_speed = bidirectional_smooth(inst_speed, window=15)
 
-        # --- 3. 加速度计算 (Acceleration Calculation) ---
-        # 使用大跨度微分 (Wide Span Difference) 配合物理截断
-        k = 7  # 半窗口长度 (约 0.25s)
+        # 4. [透视补偿] (保留之前的逻辑，解决拱形误差)
+        path_len = np.sum(np.sqrt(np.diff(smooth_x)**2 + np.diff(smooth_y)**2))
+        duration = (n_points - 1) * dt
+        avg_speed = path_len / duration if duration > 0 else 0
+        
+        if avg_speed > 1.5 and n_points > self.cfg.FPS * 1.5: 
+            EDGE_RATIO = 0.25 
+            BASE_TRUST = 0.3   
+            weights = np.ones(n_points)
+            fade_len = int(n_points * EDGE_RATIO)
+            if fade_len > 0:
+                ramp = np.linspace(0, 1, fade_len)
+                fade_curve = BASE_TRUST + (1 - BASE_TRUST) * np.sin(ramp * np.pi / 2)
+                weights[:fade_len] = fade_curve
+                weights[-fade_len:] = fade_curve[::-1]
+            corrected_speed = weights * smooth_speed + (1 - weights) * avg_speed
+        else:
+            corrected_speed = smooth_speed
+
+        # 5. 加速度计算 (核心修改：宽窗微分 + 移除锚点)
+        # 不再使用 anchor_interpolation，直接计算物理导数
+        k = 7  # 宽窗半径 (约0.25s)
         dense_accel = np.zeros(n_points)
         
         for i in range(n_points):
             idx_start = max(0, i - k)
             idx_end = min(n_points - 1, i + k)
-            
-            dv = smooth_speed[idx_end] - smooth_speed[idx_start]
+            dv = corrected_speed[idx_end] - corrected_speed[idx_start]
             dt_span = (idx_end - idx_start) * dt
             
             if dt_span > 1e-4:
-                raw_val = dv / dt_span
-                # 物理约束截断，防止边缘噪声过大
-                dense_accel[i] = np.clip(raw_val, -phys_limit, phys_limit)
+                val = dv / dt_span
+                dense_accel[i] = np.clip(val, -phys_limit, phys_limit)
             else:
                 dense_accel[i] = 0.0
 
-        # --- 4. 锚点插值 (Anchor Interpolation) ---
-        # 降采样平滑加速度曲线
-        anchor_step = 15
-        anchor_indices = np.arange(0, n_points, anchor_step)
-        
-        # 确保包含最后一帧
-        if anchor_indices[-1] != n_points - 1:
-            anchor_indices = np.append(anchor_indices, n_points - 1)
-            
-        anchor_values = dense_accel[anchor_indices]
-        
-        # [修改点] 已移除强制归零逻辑
-        # anchor_values[0] = 0.0
-        # anchor_values[-1] = 0.0
-        
-        # 线性插值生成最终加速度
-        final_accel = np.interp(np.arange(n_points), anchor_indices, anchor_values)
+        # [二次平滑] 这一步至关重要，它替代了锚点插值的作用，但保留了局部特征
+        final_accel = bidirectional_smooth(dense_accel, window=21)
 
-        # --- 5. 结果回写 (Write Back) ---
-        for i, point in enumerate(trajectory):
-            # 保留旧值为 'rt_' (Real-time) 前缀
-            point['rt_speed'] = point['speed'] 
-            point['rt_accel'] = point['accel']
+        # 6. 回写
+        for i, p in enumerate(trajectory):
+            p['rt_speed'] = float(inst_speed[i]) 
+            p['rt_accel'] = float(dense_accel[i])
             
-            # 写入优化后的值
-            point['speed'] = float(smooth_speed[i])
-            point['accel'] = float(final_accel[i])
+            p['speed'] = float(corrected_speed[i])
+            p['accel'] = float(final_accel[i])
 
         return trajectory
 
