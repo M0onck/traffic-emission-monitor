@@ -55,9 +55,17 @@ class Visualizer:
     """
     核心渲染器
     """
-    def __init__(self, calibration_points: np.ndarray, trace_length: int = 30):
+    def __init__(self, calibration_points: np.ndarray, trace_length: int = 30, opmode_calculator=None):
+        """
+        初始化渲染器
+        :param calibration_points: 标定区域点集
+        :param trace_length: 轨迹显示长度
+        :param opmode_calculator: [新增] 注入工况计算器，用于获取统一的工况描述
+        """
         self.calibration_points = calibration_points.astype(np.int32)
-        # 注入 LabelFormatter
+        self.opmode_calculator = opmode_calculator
+        
+        # 注入 LabelFormatter (虽然目前主要使用自定义 labels)
         self.formatter = LabelFormatter()
         
         self.box_annotator = sv.BoxAnnotator(thickness=2)
@@ -73,8 +81,8 @@ class Visualizer:
         """
         [修改版] 绘制单帧画面
         特性：
-        1. 标签内容简化：直接构建包含 OpMode 的文本，不再依赖外部 formatter。
-        2. 视觉优化：隐藏实时速度，仅显示工况代码和状态 (如 Op:33 [Accel])。
+        1. 标签内容简化：直接构建包含 OpMode 的文本。
+        2. 视觉优化：同步使用 OpModeCalculator 的描述文本。
         """
         scene = frame.copy()
         
@@ -91,13 +99,19 @@ class Visualizer:
             if data.emission_info and 'op_mode' in data.emission_info:
                 op = data.emission_info['op_mode']
                 
-                # 简单的状态映射表，让数字代码更具可读性
+                # [核心修改] 使用注入的 calculator 获取统一描述
                 state_str = "Run"
-                if op == 0: state_str = "Brake"      # 刹车/怠速
-                elif op == 1: state_str = "Idle"     # 怠速
-                elif op in [11, 21]: state_str = "Cruise" # 巡航
-                elif op >= 33: state_str = "Accel"   # 加速 (33,35,37...)
+                if self.opmode_calculator:
+                    # 直接获取如 "Accel (High Load)" 的标准描述
+                    state_str = self.opmode_calculator.get_description(op)
+                else:
+                    # 兜底逻辑 (兼容未注入的情况)
+                    if op == 0: state_str = "Brake"
+                    elif op == 1: state_str = "Idle"
+                    elif op in [11, 21]: state_str = "Cruise"
+                    elif op >= 33: state_str = "Accel"
                 
+                # 显示格式: Op:37 [Accel (High Load)]
                 line2 = f"Op:{op} [{state_str}]"
                 
             elif data.speed is not None:
@@ -111,7 +125,6 @@ class Visualizer:
             labels.append(f"{line1}\n{line2}")
 
         # 2. 绘制基础图层 (ROI 区域)
-        # 保持原有的标定框绘制逻辑
         if self.calibration_points is not None and len(self.calibration_points) > 0:
             cv2.polylines(scene, [self.calibration_points], True, (255, 255, 0), 1)
             

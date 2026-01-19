@@ -83,7 +83,11 @@ def main():
             'tracker': sv.ByteTrack(frame_rate=cfg.FPS),
             'smoother': sv.DetectionsSmoother(length=3),
             'transformer': ViewTransformer(source_points, target_points),
-            'visualizer': Visualizer(calibration_points=source_points, trace_length=cfg.FPS),
+            'visualizer': Visualizer(
+                calibration_points=source_points,
+                trace_length=cfg.FPS,
+                opmode_calculator=opmode_calculator
+            ),
             'registry': VehicleRegistry(
                 fps=cfg.FPS,
                 min_survival_frames=cfg.MIN_SURVIVAL_FRAMES,
@@ -96,7 +100,7 @@ def main():
         }
 
         if cfg.DEBUG_MODE:
-            components['reporter'] = Reporter(reporter_config)
+            components['reporter'] = Reporter(reporter_config, opmode_calculator)
 
         if cfg.ENABLE_MOTION:
             components['kinematics'] = KinematicsEstimator(kinematics_config)

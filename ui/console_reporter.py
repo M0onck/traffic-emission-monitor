@@ -4,10 +4,16 @@ from collections import defaultdict
 import plotext as plt
 
 class Reporter:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, opmode_calculator=None):
+        """
+        初始化报告器
+        :param config: 报告配置参数
+        :param opmode_calculator: 注入 OpMode 计算器实例，用于获取工况描述
+        """
         self.debug_mode = config.get('debug_mode', False)
         self.fps = config.get('fps', 30)
         self.min_survival_frames = config.get('min_survival_frames', 30)
+        self.opmode_calculator = opmode_calculator
 
     def print_exit_report(self, tid, record, kinematics_estimator, vehicle_classifier):
         """
@@ -60,12 +66,15 @@ class Reporter:
         op_summary = []
         for mode in sorted(op_stats.keys()):
             seconds = op_stats[mode] / self.fps
-            mode_name = {
-                0: "Brake", 1: "Idle", 11: "Coast", 
-                21: "Cruise(L)", 33: "Cruise(H)",
-                35: "Accel(L)", 37: "Accel(H)"
-            }.get(mode, str(mode))
-            op_summary.append(f"{mode_name}:{seconds:.1f}s")
+            
+            # [修改] 复用 opmode_calculator 的描述逻辑
+            if self.opmode_calculator:
+                mode_str = self.opmode_calculator.get_description(mode)
+            else:
+                # 兜底显示 (如果未注入实例)
+                mode_str = f"Mode {mode}"
+            
+            op_summary.append(f"{mode_str}:{seconds:.1f}s")
         
         op_str = " | ".join(op_summary) if op_summary else "No Data"
         
@@ -81,7 +90,7 @@ class Reporter:
         else:
             intensity_str = "Intensity: N/A (Dist < 10m)"
 
-        # 6. [新增] 绘制运动学曲线 (速度 & 加速度)
+        # 6. 绘制运动学曲线 (速度 & 加速度)
         trajectory = record.get('trajectory', [])
         
         # 打印报告头
@@ -106,10 +115,7 @@ class Reporter:
 
     def _plot_kinematics_graph(self, speeds, accels):
         """
-        [可视化终极版 - 修复版] 绘制运动学曲线
-        修复点：
-        1. 解决了 yticks 传入整数导致的 TypeError 报错。
-        2. 手动计算 13 个均匀分布的刻度值，强制填满每一行。
+        绘制运动学曲线
         """
         # 1. 获取终端尺寸
         term_w, term_h = plt.terminal_size()
@@ -128,7 +134,6 @@ class Reporter:
         t = [i / self.fps for i in range(len(speeds))]
         
         # [核心参数] 刻度数量
-        # 总高31 -> 单图高约15 -> 除去标题/X轴，实际绘图区约12-13行
         DENSE_TICKS_COUNT = 13
 
         # --- 子图 1: 速度曲线 (Top) ---
@@ -144,8 +149,6 @@ class Reporter:
         limit_v = max(max_v * 1.05, 1.0) 
         plt.ylim(0, limit_v)
         
-        # [修复] 手动生成刻度列表
-        # linspace(start, stop, num) -> 生成包含 num 个点的等差数列
         v_ticks = np.linspace(0, limit_v, DENSE_TICKS_COUNT).tolist()
         plt.yticks(v_ticks) 
 
@@ -162,7 +165,6 @@ class Reporter:
         limit_a = max(max_abs_a * 1.05, 0.5) 
         plt.ylim(-limit_a, limit_a)
         
-        # [修复] 手动生成刻度列表
         a_ticks = np.linspace(-limit_a, limit_a, DENSE_TICKS_COUNT).tolist()
         plt.yticks(a_ticks)
         
