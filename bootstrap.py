@@ -51,7 +51,7 @@ def main():
         # 共享 OpMode 计算器
         opmode_calculator = MovesOpModeCalculator(config=cfg._e)
 
-        # 刹车模型配置 (使用新 key)
+        # 刹车模型配置
         brake_emission_config = {
             "braking_decel_threshold": cfg.BRAKING_DECEL_THRESHOLD,
             "idling_speed_threshold": cfg.IDLING_SPEED_THRESHOLD,
@@ -60,7 +60,7 @@ def main():
             "brake_wear_coefficients": cfg.BRAKE_WEAR_COEFFICIENTS 
         }
 
-        # 轮胎模型配置 (使用新 key)
+        # 轮胎模型配置
         tire_emission_config = {
             "tire_wear_coefficients": cfg.TIRE_WEAR_COEFFICIENTS,
             "emission_params": cfg._e

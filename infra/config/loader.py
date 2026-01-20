@@ -84,14 +84,14 @@ for sem_key, coeff_data in _vsp_raw.items():
     if sem_key in VEHICLE_SEMANTIC_MAP:
         VSP_COEFFS[VEHICLE_SEMANTIC_MAP[sem_key]] = coeff_data
 
-# 3.2 刹车磨损系数 (统一命名)
+# 3.2 刹车磨损系数
 BRAKE_WEAR_COEFFICIENTS = {}
 _brake_raw = _cfg.get("brake_wear_coefficients", {})
 for cat, rates in _brake_raw.items():
     if not isinstance(rates, dict): continue
     BRAKE_WEAR_COEFFICIENTS[cat] = {int(op): val for op, val in rates.items()}
 
-# 3.3 轮胎磨损系数 (统一命名)
+# 3.3 轮胎磨损系数
 TIRE_WEAR_COEFFICIENTS = {}
 _tire_raw = _cfg.get("tire_wear_coefficients", {})
 for cat, rates in _tire_raw.items():

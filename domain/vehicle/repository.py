@@ -87,8 +87,8 @@ class VehicleRegistry:
         :param accel: 实时加速度 (m/s^2)
         :param raw_x: 物理坐标 X (经过卡尔曼滤波/平滑后的值)
         :param raw_y: 物理坐标 Y (经过卡尔曼滤波/平滑后的值)
-        :param pixel_x: [新增] 原始像素坐标 X (用于几何测距)
-        :param pixel_y: [新增] 原始像素坐标 Y (用于几何测距)
+        :param pixel_x: 原始像素坐标 X (用于几何测距)
+        :param pixel_y: 原始像素坐标 Y (用于几何测距)
         """
         if tid in self.records:
             rec = self.records[tid]
@@ -100,8 +100,8 @@ class VehicleRegistry:
                 'accel': accel,
                 'raw_x': raw_x,
                 'raw_y': raw_y,
-                'pixel_x': pixel_x, # [新增]
-                'pixel_y': pixel_y  # [新增]
+                'pixel_x': pixel_x,
+                'pixel_y': pixel_y
             })
             rec['valid_samples_count'] = rec.get('valid_samples_count', 0) + 1
 
