@@ -1,4 +1,5 @@
 import sys
+import os
 import cv2
 from ultralytics import YOLO
 import supervision as sv
@@ -128,4 +129,7 @@ def main():
         if 'engine' in locals(): engine.cleanup(0)
 
 if __name__ == "__main__":
+    # import multiprocessing
+    # multiprocessing.freeze_support()
+
     main()
